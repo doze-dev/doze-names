@@ -1,0 +1,11 @@
+doze-names
+Copyright 2026 the doze authors
+
+This product includes software developed by the doze authors, licensed under
+the Apache License, Version 2.0.
+
+----------------------------------------------------------------------
+
+The DNS wire handling in resolver.go is derived from doze
+(https://github.com/doze-dev/doze), internal/daemon/resolver.go, which is
+licensed under the Apache License, Version 2.0.

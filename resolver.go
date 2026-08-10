@@ -56,7 +56,7 @@ func Serve(ctx context.Context, r *Registry, logf func(string, ...any)) *Server 
 // doze core mutates its map as services are added to a running stack, and a
 // name should answer the moment it exists rather than after the next write.
 func ServeResolve(ctx context.Context, resolve Resolve, logf func(string, ...any)) *Server {
-	return serveWith(ctx, resolve, ResolverAddr(), logf)
+	return serveWith(ctx, resolve, ResolverAddr(), logf, nil)
 }
 
 // ServeAt is Serve on a specific address. The zone's address is fixed per
@@ -64,10 +64,10 @@ func ServeResolve(ctx context.Context, resolve Resolve, logf func(string, ...any
 // somewhere unusual, where the peer protocol still holds as long as every peer
 // on the machine agrees on the address.
 func ServeAt(ctx context.Context, r *Registry, addr string, logf func(string, ...any)) *Server {
-	return serveWith(ctx, r.Resolve, addr, logf)
+	return serveWith(ctx, r.Resolve, addr, logf, r)
 }
 
-func serveWith(ctx context.Context, resolve Resolve, addr string, logf func(string, ...any)) *Server {
+func serveWith(ctx context.Context, resolve Resolve, addr string, logf func(string, ...any), reg *Registry) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -87,15 +87,35 @@ func serveWith(ctx context.Context, resolve Resolve, addr string, logf func(stri
 					close(s.bound)
 				}
 				logf("names: serving %s on %s", Suffix, addr)
+				if reg != nil {
+					reg.claimResolver(addr)
+				}
 				announced = false
 				serveConn(ctx, conn, resolve)
+				if reg != nil {
+					reg.releaseResolver()
+				}
 				if ctx.Err() != nil {
 					return
 				}
 				// Lost it some other way (socket closed under us): try again.
 			case isAddrInUse(err):
 				if !announced {
-					logf("names: a peer is already serving %s; standing by", Suffix)
+					var h Entry
+					var ok bool
+					if reg != nil {
+						h, ok = reg.ResolverHolder()
+					}
+					if ok {
+						logf("names: %s is serving %s (pid %d); standing by", h.Owner, Suffix, h.PID)
+					} else {
+						// Not a doze peer. On Linux this is usually
+						// systemd-resolved or dnsmasq holding port 53 on the
+						// wildcard, which takes every address with it.
+						logf("names: something other than doze holds %s, so %s names will not "+
+							"resolve through it — apex names still work via the hosts file",
+							addr, Suffix)
+					}
 					announced = true
 				}
 			default:

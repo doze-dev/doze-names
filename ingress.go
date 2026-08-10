@@ -48,6 +48,35 @@ const (
 // free when a holder dies.
 const ingressKey = "_ingress"
 
+// resolverKey records which process holds the DNS socket, for the same reason
+// ingressKey does: "address in use" says nothing about WHO, and telling a user
+// a doze peer has it when systemd-resolved does sends them looking in the
+// wrong place.
+const resolverKey = "_resolver"
+
+// claimResolver records this process as the zone's DNS server.
+func (r *Registry) claimResolver(addr string) {
+	_ = r.update(func(m map[string]Entry) error {
+		m[resolverKey] = Entry{PID: r.pid, Owner: r.owner, Target: addr}
+		return nil
+	})
+}
+
+func (r *Registry) releaseResolver() {
+	_ = r.update(func(m map[string]Entry) error {
+		if e, ok := m[resolverKey]; ok && e.PID == r.pid {
+			delete(m, resolverKey)
+		}
+		return nil
+	})
+}
+
+// ResolverHolder returns the doze process serving DNS, if one is.
+func (r *Registry) ResolverHolder() (Entry, bool) {
+	e, ok := r.Snapshot()[resolverKey]
+	return e, ok
+}
+
 // claimIngress records this process as the front door.
 func (r *Registry) claimIngress(addr string) {
 	_ = r.update(func(m map[string]Entry) error {
@@ -250,7 +279,7 @@ func hostOnly(host string) string {
 func routed(r *Registry) []string {
 	var out []string
 	for host, e := range r.Snapshot() {
-		if host == ingressKey {
+		if host == ingressKey || host == resolverKey {
 			continue // bookkeeping, not a route
 		}
 		if e.Target != "" {

@@ -92,6 +92,21 @@ func (l *Lease) Route(target string) error {
 	})
 }
 
+// RouteFor publishes a route for a name this process already holds, without
+// needing the Lease in hand — doze core registers its names in one place and
+// its routes in another, and threading leases between them would be ceremony.
+func (r *Registry) RouteFor(host, target string) error {
+	return r.update(func(m map[string]Entry) error {
+		e, ok := m[normalize(host)]
+		if !ok || e.PID != r.pid {
+			return fmt.Errorf("%s is not held by this process", host)
+		}
+		e.Target = target
+		m[normalize(host)] = e
+		return nil
+	})
+}
+
 // routeFor returns the backend for a Host header, or "" if this machine does
 // not front that name.
 func (r *Registry) routeFor(host string) string {

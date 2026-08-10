@@ -26,9 +26,20 @@ import (
 	"time"
 )
 
-// IngressAddr is the shared front door. The wildcard is not a detail: it is the
-// only form macOS will bind unprivileged.
+// IngressAddr is the shared front door, for display. The wildcard is not a
+// detail: it is the only form macOS will bind unprivileged.
 const IngressAddr = ":80"
+
+// The front door is bound on IPv4 EXPLICITLY. Listening on ":80" takes the
+// IPv6 wildcard, and macOS will hand that over even when another program
+// already holds IPv4 0.0.0.0:80 — leaving a socket no client reaches while the
+// bind reports success. Every name in the zone resolves to a 127.0.0.x address,
+// so IPv4 is the only family that matters here, and contending for it directly
+// is what makes "someone else has the port" an error rather than a surprise.
+const (
+	ingressNetwork = "tcp4"
+	ingressBind    = "0.0.0.0:80"
+)
 
 // ingressKey records which process holds the front door. It is not a valid
 // in-zone name — no host ends in it — so it can never collide with a real
@@ -116,7 +127,7 @@ func ServeIngress(ctx context.Context, r *Registry, logf func(string, ...any)) *
 		defer close(in.done)
 		var announced bool
 		for {
-			ln, err := net.Listen("tcp", IngressAddr)
+			ln, err := net.Listen(ingressNetwork, ingressBind)
 			switch {
 			case err == nil:
 				select {
@@ -125,7 +136,7 @@ func ServeIngress(ctx context.Context, r *Registry, logf func(string, ...any)) *
 					close(in.bound)
 				}
 				logf("names: fronting %s on %s", Suffix, IngressAddr)
-				r.claimIngress(IngressAddr)
+				r.claimIngress(ingressBind)
 				announced = false
 				srv := &http.Server{Handler: proxy(r)}
 				go func() { <-ctx.Done(); _ = srv.Close() }()

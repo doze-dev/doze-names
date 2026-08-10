@@ -2,6 +2,7 @@ package names
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -99,5 +100,37 @@ func TestFrontDoorProxiesByHostAndPreservesIt(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("unfronted name = %d, want 404", resp2.StatusCode)
+	}
+}
+
+func TestFrontDoorContendsOnIPv4(t *testing.T) {
+	// Listening on ":80" takes the IPv6 wildcard, and macOS grants it even when
+	// another program holds IPv4 0.0.0.0:80 — so the bind succeeds, no client
+	// ever reaches the socket, and we would record ourselves as fronting while
+	// the other program served every doze name. Observed exactly that.
+	//
+	// Every name in the zone is a 127.0.0.x address, so IPv4 is the family that
+	// matters and the one to contend for.
+	if ingressNetwork != "tcp4" {
+		t.Errorf("ingressNetwork = %q, want tcp4 — see the comment above", ingressNetwork)
+	}
+	if ingressBind != "0.0.0.0:80" {
+		t.Errorf("ingressBind = %q, want the IPv4 wildcard", ingressBind)
+	}
+
+	// And prove the property on an arbitrary port: holding IPv4 must make our
+	// bind fail rather than succeed on a socket nobody can reach.
+	held, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Skip("cannot bind an IPv4 wildcard here")
+	}
+	defer held.Close()
+	_, port, _ := net.SplitHostPort(held.Addr().String())
+
+	if second, err := net.Listen(ingressNetwork, "0.0.0.0:"+port); err == nil {
+		second.Close()
+		t.Error("a second IPv4 wildcard bind succeeded; contention is not real")
+	} else if !isAddrInUse(err) {
+		t.Errorf("second bind failed with %v, want address-in-use", err)
 	}
 }

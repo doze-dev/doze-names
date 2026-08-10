@@ -26,6 +26,10 @@ type Entry struct {
 	PID   int    `json:"pid"`
 	Owner string `json:"owner"` // "doze" | "doze-aws" | "doze-kafka"
 	Tier  Tier   `json:"tier"`
+	// Target is where the shared front door proxies this name, "host:port".
+	// Empty means the name resolves but is not fronted, which is right for a
+	// service that is not HTTP.
+	Target string `json:"target,omitempty"`
 }
 
 // Registry is a handle on the shared name file.
@@ -106,7 +110,14 @@ func (r *Registry) claim(n Name, want net.IP) (*Lease, error) {
 				return err
 			}
 		}
-		m[n.Host] = Entry{IP: ip.String(), PID: r.pid, Owner: r.owner, Tier: n.Tier}
+		// Keep any route this process already published, so re-claiming a name
+		// (which republishDomains does on every topology change) does not drop
+		// it from the front door.
+		e := Entry{IP: ip.String(), PID: r.pid, Owner: r.owner, Tier: n.Tier}
+		if cur, ok := m[n.Host]; ok && cur.PID == r.pid {
+			e.Target = cur.Target
+		}
+		m[n.Host] = e
 		lease = &Lease{Name: n, IP: ip, reg: r}
 		return nil
 	})

@@ -188,17 +188,30 @@ func hostsBlockInstalled() bool {
 // trains people to type their password without reading what it is for.
 func runPrivileged(o Options, what, script string) error {
 	if o.Print {
-		fmt.Fprintf(o.out(), "# %s\nsudo sh -c '\n%s\n'\n", what, script)
+		fmt.Fprintf(o.out(), "# %s\n%s", what, pasteable(script))
 		return nil
 	}
-	fmt.Fprintf(o.out(), "%s needs sudo once: %s\n", "doze", what)
+	fmt.Fprintf(o.out(), "doze needs sudo once: %s\n", what)
 	c := exec.Command("sudo", "sh", "-c", script)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, o.out(), os.Stderr
 	if err := c.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "\nthe privileged step failed. To do it by hand:\n\nsudo sh -c '\n%s\n'\n", script)
+		fmt.Fprintf(os.Stderr, "\nthe privileged step failed. To do it by hand:\n\n%s", pasteable(script))
 		return fmt.Errorf("setup: %w", err)
 	}
 	return nil
+}
+
+// pasteable renders the script as something a person can actually paste.
+//
+// Not `sudo sh -c '<script>'`: the script contains single quotes of its own —
+// heredoc delimiters and printf arguments — and the first of them ends the
+// quoting, so the pasted command breaks in a way that is tedious to diagnose.
+// Feeding it on stdin through a quoted heredoc sidesteps quoting entirely, and
+// nests correctly with the heredocs already inside the script because the
+// delimiters differ.
+func pasteable(script string) string {
+	const delim = "DOZE_SETUP"
+	return "sudo sh <<'" + delim + "'\n" + strings.TrimRight(script, "\n") + "\n" + delim + "\n"
 }
 
 // shellQuote renders s for safe inclusion in a single-quoted shell heredoc

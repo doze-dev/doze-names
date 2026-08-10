@@ -130,3 +130,30 @@ func TestShellQuote(t *testing.T) {
 		t.Errorf("shellQuote(it's) = %s", got)
 	}
 }
+
+func TestPasteableScriptSurvivesItsOwnQuotes(t *testing.T) {
+	// The scripts contain single quotes — heredoc delimiters and printf
+	// arguments — so wrapping them in `sudo sh -c '…'` breaks at the first one.
+	// Anyone cautious enough to read the script before running it is exactly
+	// the person who would hit that.
+	script := "cat > /tmp/x <<'PLIST'\n<plist/>\nPLIST\nprintf 'nameserver 127.0.0.1\\n' > /tmp/y\n"
+	got := pasteable(script)
+
+	if strings.Contains(got, "sh -c") {
+		t.Error("still using sh -c, which cannot carry a script containing quotes")
+	}
+	if !strings.HasPrefix(got, "sudo sh <<'DOZE_SETUP'\n") {
+		t.Errorf("not a quoted heredoc:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "\nDOZE_SETUP\n") {
+		t.Errorf("heredoc not terminated:\n%s", got)
+	}
+	if !strings.Contains(got, "<<'PLIST'") {
+		t.Error("the inner heredoc was mangled")
+	}
+	// The delimiter must not appear in the body, or the heredoc ends early.
+	body := strings.TrimSuffix(strings.TrimPrefix(got, "sudo sh <<'DOZE_SETUP'\n"), "\nDOZE_SETUP\n")
+	if strings.Contains(body, "DOZE_SETUP") {
+		t.Error("the script contains the heredoc delimiter")
+	}
+}

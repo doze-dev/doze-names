@@ -196,13 +196,18 @@ func (r *Registry) URLFor(host string) string {
 	if !ok || e.Target == "" {
 		return ""
 	}
-	if l, err := net.Listen("tcp", IngressAddr); err == nil {
-		// Nothing is fronting: the port is free, so the name alone will not
-		// reach anything.
-		_ = l.Close()
+	// DIAL, do not bind. Probing by binding takes the port for as long as the
+	// probe holds it, which can make our own front door lose the race and back
+	// off for a retry interval — a check that causes the failure it reports.
+	c, err := net.DialTimeout("tcp", "127.0.0.1"+IngressAddr, 200*time.Millisecond)
+	if err != nil {
+		// Nothing is fronting, so the bare name reaches nothing; give the
+		// caller a URL that works.
 		if _, port, err := net.SplitHostPort(e.Target); err == nil {
 			return "http://" + host + ":" + port
 		}
+		return ""
 	}
+	_ = c.Close()
 	return "http://" + host
 }

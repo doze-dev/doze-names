@@ -77,7 +77,15 @@ type Lease struct {
 
 // Claim registers a name to this process and returns the address it resolves
 // to. An apex name held by another live process returns ErrHeld and no lease.
-func (r *Registry) Claim(n Name) (*Lease, error) {
+func (r *Registry) Claim(n Name) (*Lease, error) { return r.claim(n, nil) }
+
+// ClaimAt registers a name at an address the caller picked, for a host that
+// runs its own allocator — doze core assigns per-(stack, service) addresses and
+// persists them, so its names must keep the addresses it already handed out
+// rather than be rehashed here.
+func (r *Registry) ClaimAt(n Name, ip net.IP) (*Lease, error) { return r.claim(n, ip) }
+
+func (r *Registry) claim(n Name, want net.IP) (*Lease, error) {
 	var lease *Lease
 	err := r.update(func(m map[string]Entry) error {
 		if cur, ok := m[n.Host]; ok && cur.PID != r.pid && alive(cur.PID) {
@@ -91,9 +99,12 @@ func (r *Registry) Claim(n Name) (*Lease, error) {
 				taken[e.IP] = true
 			}
 		}
-		ip, err := addressFor(n, taken)
-		if err != nil {
-			return err
+		ip := want
+		if ip == nil {
+			var err error
+			if ip, err = addressFor(n, taken); err != nil {
+				return err
+			}
 		}
 		m[n.Host] = Entry{IP: ip.String(), PID: r.pid, Owner: r.owner, Tier: n.Tier}
 		lease = &Lease{Name: n, IP: ip, reg: r}

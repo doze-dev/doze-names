@@ -51,11 +51,23 @@ func Serve(ctx context.Context, r *Registry, logf func(string, ...any)) *Server 
 	return ServeAt(ctx, r, ResolverAddr(), logf)
 }
 
+// ServeResolve is Serve with a caller-supplied resolver, for a host that keeps
+// a live view of its own names and wants that consulted before the registry —
+// doze core mutates its map as services are added to a running stack, and a
+// name should answer the moment it exists rather than after the next write.
+func ServeResolve(ctx context.Context, resolve Resolve, logf func(string, ...any)) *Server {
+	return serveWith(ctx, resolve, ResolverAddr(), logf)
+}
+
 // ServeAt is Serve on a specific address. The zone's address is fixed per
 // platform, so this exists for tests — and for anyone routing the zone
 // somewhere unusual, where the peer protocol still holds as long as every peer
 // on the machine agrees on the address.
 func ServeAt(ctx context.Context, r *Registry, addr string, logf func(string, ...any)) *Server {
+	return serveWith(ctx, r.Resolve, addr, logf)
+}
+
+func serveWith(ctx context.Context, resolve Resolve, addr string, logf func(string, ...any)) *Server {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -76,7 +88,7 @@ func ServeAt(ctx context.Context, r *Registry, addr string, logf func(string, ..
 				}
 				logf("names: serving %s on %s", Suffix, addr)
 				announced = false
-				serveConn(ctx, conn, r.Resolve)
+				serveConn(ctx, conn, resolve)
 				if ctx.Err() != nil {
 					return
 				}

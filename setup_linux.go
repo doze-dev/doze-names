@@ -30,9 +30,10 @@ const (
 	resolvConf   = "/etc/resolv.conf"
 )
 
-// unprivilegedPortStart is what the sysctl must allow. 53 covers the resolver's
-// own port and, below 80, the ports services want to hold on their addresses.
-const unprivilegedPortStart = 53
+// unprivilegedPortStart is what the sysctl must allow: 80, for the shared front
+// door. The resolver no longer needs it — it sits on a high port, because 53 is
+// held on the wildcard by whatever already serves DNS.
+const unprivilegedPortStart = 80
 
 // dnsmasqPresent reports whether dnsmasq is RUNNING, not merely installed.
 //
@@ -102,7 +103,7 @@ func check() Status {
 
 	detail := fmt.Sprintf("ports ≥ %d bindable unprivileged", unprivilegedPortStart)
 	if !sysctlInstalled() {
-		detail = "not applied — the resolver cannot bind :53, nor services :80"
+		detail = "not applied — services cannot bind :80 (the resolver is unaffected: it uses " + resolverPort + ")"
 	}
 	st.Steps = append(st.Steps, Step{Name: "unprivileged ports", Done: sysctlInstalled(), Detail: detail})
 
@@ -144,7 +145,7 @@ func install(o Options) error {
 	b.WriteString("set -e\n")
 
 	fmt.Fprintf(&b, "printf %s > %s\n",
-		shellQuote(fmt.Sprintf("# doze: lets the resolver bind :53 and services bind :80 unprivileged\nnet.ipv4.ip_unprivileged_port_start=%d\n", unprivilegedPortStart)),
+		shellQuote(fmt.Sprintf("# doze: lets the shared front door bind :80 unprivileged\nnet.ipv4.ip_unprivileged_port_start=%d\n", unprivilegedPortStart)),
 		sysctlPath)
 	b.WriteString("sysctl -q --system\n")
 
@@ -155,12 +156,12 @@ func install(o Options) error {
 	case m == mgrResolved:
 		fmt.Fprintf(&b, "mkdir -p %s\n", "/etc/systemd/resolved.conf.d")
 		fmt.Fprintf(&b, "printf %s > %s\n",
-			shellQuote(fmt.Sprintf("[Resolve]\nDNS=%s\nDomains=~%s\n", resolverIP, Suffix)), resolvedDrop)
+			shellQuote(fmt.Sprintf("[Resolve]\nDNS=%s:%s\nDomains=~%s\n", resolverIP, resolverPort, Suffix)), resolvedDrop)
 		b.WriteString("systemctl restart systemd-resolved\n")
 	case dnsmasqPresent():
 		fmt.Fprintf(&b, "mkdir -p %s\n", "/etc/dnsmasq.d")
 		fmt.Fprintf(&b, "printf %s > %s\n",
-			shellQuote(fmt.Sprintf("server=/%s/%s\n", Suffix, resolverIP)), dnsmasqDrop)
+			shellQuote(fmt.Sprintf("server=/%s/%s#%s\n", Suffix, resolverIP, resolverPort)), dnsmasqDrop)
 		b.WriteString("systemctl restart dnsmasq 2>/dev/null || true\n")
 	}
 

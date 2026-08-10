@@ -67,6 +67,21 @@ const (
 // system resolver. Excluded from the dynamic range below.
 const resolverIP = "127.0.0.54"
 
+// resolverPort is the port the resolver listens on. Deliberately NOT 53.
+//
+// Port 53 is unavailable on the machines that matter most: systemd-resolved
+// holds it on the WILDCARD, which takes every address on that port with it, so
+// 127.0.0.54:53 cannot be bound at all — measured on Ubuntu with systemd 255,
+// where 0.0.0.0:53, 127.0.0.53:53 and 127.0.0.54:53 were all in use.
+//
+// An earlier draft chose 53 to avoid needing a port in the resolver config,
+// believing neither systemd-resolved nor dnsmasq would take one reliably. Both
+// do — systemd-resolved since v249 (DNS=addr:port), dnsmasq via
+// server=/zone/addr#port — and the port that actually cannot be had is 53.
+// Using a high port also takes the privileged-port sysctl off the DNS path
+// entirely; it is still needed for the :80 front door.
+const resolverPort = "5323"
+
 // apexIP is the fixed address of each well-known service. Adding an entry here
 // is a compatibility commitment: it goes into people's /etc/hosts.
 var apexIP = map[string]string{
@@ -165,16 +180,15 @@ func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 // ResolverAddr is where the resolver listens, which differs by platform
 // because the two OSes route a TLD differently.
 //
-// macOS routes a whole TLD with a port via /etc/resolver/doze, so the resolver
-// can sit on an unprivileged high port. Linux has no such hook: the route is a
-// systemd-resolved or dnsmasq drop-in, and neither reliably accepts a port, so
-// the resolver takes port 53 on an address of its own. Binding 53 unprivileged
-// is what the sysctl drop-in in setup is for.
+// macOS routes a whole TLD via /etc/resolver/doze. Linux has no such hook: the
+// route is a systemd-resolved or dnsmasq drop-in, both of which take an address
+// AND a port, so the resolver sits on a high port there too — on an address of
+// its own, so it never contends with whatever already owns port 53.
 func ResolverAddr() string {
 	if runtime.GOOS == "linux" {
-		return resolverIP + ":53"
+		return resolverIP + ":" + resolverPort
 	}
-	return "127.0.0.1:5323"
+	return "127.0.0.1:" + resolverPort
 }
 
 // EnvHome overrides the shared doze home, matching doze core's variable.

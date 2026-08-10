@@ -38,6 +38,8 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -173,4 +175,21 @@ func ResolverAddr() string {
 		return resolverIP + ":53"
 	}
 	return "127.0.0.1:5323"
+}
+
+// EnvHome overrides the shared doze home, matching doze core's variable.
+const EnvHome = "DOZE_HOME"
+
+// Home is the directory the binaries share. They have to agree on it or they
+// will not see each other's names, so it is resolved here rather than in each
+// of them: $DOZE_HOME, else ~/.doze.
+func Home() string {
+	if h := os.Getenv(EnvHome); h != "" {
+		return h
+	}
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return "." + Suffix
+	}
+	return filepath.Join(h, "."+Suffix)
 }

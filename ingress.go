@@ -30,6 +30,39 @@ import (
 // only form macOS will bind unprivileged.
 const IngressAddr = ":80"
 
+// ingressKey records which process holds the front door. It is not a valid
+// in-zone name — no host ends in it — so it can never collide with a real
+// entry, and Resolve ignores it because it is out of zone. Storing it in the
+// registry rather than in a file of its own means the pid sweep frees it for
+// free when a holder dies.
+const ingressKey = "_ingress"
+
+// claimIngress records this process as the front door.
+func (r *Registry) claimIngress(addr string) {
+	_ = r.update(func(m map[string]Entry) error {
+		m[ingressKey] = Entry{PID: r.pid, Owner: r.owner, Target: addr}
+		return nil
+	})
+}
+
+func (r *Registry) releaseIngress() {
+	_ = r.update(func(m map[string]Entry) error {
+		if e, ok := m[ingressKey]; ok && e.PID == r.pid {
+			delete(m, ingressKey)
+		}
+		return nil
+	})
+}
+
+// IngressHolder returns the doze process fronting the zone, if one is. It
+// answers a question a TCP dial cannot: whether the program on :80 is ours.
+// Anything else there will answer requests for doze names with its own site,
+// which looks like doze serving the wrong thing.
+func (r *Registry) IngressHolder() (Entry, bool) {
+	e, ok := r.Snapshot()[ingressKey]
+	return e, ok
+}
+
 // Route publishes where this name's traffic should go — "127.0.0.2:4566", say.
 // Until a name has a route the front door does not answer for it, so a service
 // that only wants DNS can leave it unset.
@@ -92,16 +125,29 @@ func ServeIngress(ctx context.Context, r *Registry, logf func(string, ...any)) *
 					close(in.bound)
 				}
 				logf("names: fronting %s on %s", Suffix, IngressAddr)
+				r.claimIngress(IngressAddr)
 				announced = false
 				srv := &http.Server{Handler: proxy(r)}
 				go func() { <-ctx.Done(); _ = srv.Close() }()
 				_ = srv.Serve(ln)
+				r.releaseIngress()
 				if ctx.Err() != nil {
 					return
 				}
 			case isAddrInUse(err):
 				if !announced {
-					logf("names: a peer is already fronting %s; standing by", Suffix)
+					if h, ok := r.IngressHolder(); ok {
+						logf("names: %s is fronting %s (pid %d); standing by", h.Owner, Suffix, h.PID)
+					} else {
+						// Nothing of ours holds the port, so something else
+						// does — and DNS still sends browsers to it, where it
+						// will answer for doze names with its own content.
+						// That reads as doze serving the wrong thing, so say
+						// plainly what happened.
+						logf("names: something other than doze holds %s, so %s names cannot be "+
+							"port-less — they still work with their port. Stop it, or use the "+
+							"port-ful URL below", IngressAddr, Suffix)
+					}
 					announced = true
 				}
 			default:
@@ -178,6 +224,9 @@ func hostOnly(host string) string {
 func routed(r *Registry) []string {
 	var out []string
 	for host, e := range r.Snapshot() {
+		if host == ingressKey {
+			continue // bookkeeping, not a route
+		}
 		if e.Target != "" {
 			out = append(out, "  http://"+host+"  →  "+e.Target+"  ("+e.Owner+")")
 		}
@@ -196,18 +245,16 @@ func (r *Registry) URLFor(host string) string {
 	if !ok || e.Target == "" {
 		return ""
 	}
-	// DIAL, do not bind. Probing by binding takes the port for as long as the
-	// probe holds it, which can make our own front door lose the race and back
-	// off for a retry interval — a check that causes the failure it reports.
-	c, err := net.DialTimeout("tcp", "127.0.0.1"+IngressAddr, 200*time.Millisecond)
-	if err != nil {
-		// Nothing is fronting, so the bare name reaches nothing; give the
-		// caller a URL that works.
-		if _, port, err := net.SplitHostPort(e.Target); err == nil {
-			return "http://" + host + ":" + port
-		}
-		return ""
+	// Ask the registry, not the network. Binding to probe takes the port from
+	// our own front door; dialling to probe only proves SOMETHING answers, and
+	// if that something is nginx this would hand back a port-less URL that
+	// reaches nginx. Only a live doze process holding the port means the bare
+	// name works.
+	if _, ok := r.IngressHolder(); ok {
+		return "http://" + host
 	}
-	_ = c.Close()
-	return "http://" + host
+	if _, port, err := net.SplitHostPort(e.Target); err == nil {
+		return "http://" + host + ":" + port
+	}
+	return ""
 }

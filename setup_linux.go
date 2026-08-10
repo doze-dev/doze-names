@@ -34,14 +34,31 @@ const (
 // own port and, below 80, the ports services want to hold on their addresses.
 const unprivilegedPortStart = 53
 
-// dnsmasqPresent looks for dnsmasq; canRouteDomain in resolvconf.go decides
-// what that means.
+// dnsmasqPresent reports whether dnsmasq is RUNNING, not merely installed.
+//
+// Installed-but-idle is common — it arrives as a dependency of other packages —
+// and writing a drop-in for a daemon nobody is using produces a config that
+// does nothing while the setup report claims the route is in place. That is a
+// false success, which is worse than an honest "not available".
+//
+// This still does not prove dnsmasq is the machine's resolver, only that it is
+// up and reading its conf.d. Proving the rest means comparing resolv.conf's
+// nameserver against what dnsmasq is bound to, which is a heuristic of its own;
+// requiring it to be running removes the common false positive cheaply.
 func dnsmasqPresent() bool {
-	if _, err := os.Stat("/etc/dnsmasq.d"); err == nil {
+	if _, err := os.Stat("/etc/dnsmasq.d"); err != nil {
+		return false
+	}
+	if _, err := exec.LookPath("dnsmasq"); err != nil {
+		return false
+	}
+	out, err := exec.Command("systemctl", "is-active", "dnsmasq").Output()
+	if err == nil && strings.TrimSpace(string(out)) == "active" {
 		return true
 	}
-	_, err := exec.LookPath("dnsmasq")
-	return err == nil
+	// No systemd, or a dnsmasq started some other way: fall back to asking
+	// whether a process is there at all.
+	return exec.Command("pgrep", "-x", "dnsmasq").Run() == nil
 }
 
 // detect reads the marker comment rather than probing processes.
@@ -65,16 +82,18 @@ func sysctlInstalled() bool {
 	return cur <= unprivilegedPortStart
 }
 
+// resolverRouteInstalled mirrors what install writes, and has to keep
+// mirroring it: install chooses the drop-in by "is this systemd-resolved, else
+// is dnsmasq running", so checking by manager alone reported a route missing on
+// a machine where it had just been written — a plain resolv.conf with dnsmasq
+// running is exactly that case, and Colima is exactly that machine.
 func resolverRouteInstalled(m manager) bool {
-	switch m {
-	case mgrResolved:
-		raw, err := os.ReadFile(resolvedDrop)
-		return err == nil && strings.Contains(string(raw), resolverIP)
-	case mgrNetworkManager, mgrResolvconf:
-		raw, err := os.ReadFile(dnsmasqDrop)
-		return err == nil && strings.Contains(string(raw), resolverIP)
+	drop := dnsmasqDrop
+	if m == mgrResolved {
+		drop = resolvedDrop
 	}
-	return false
+	raw, err := os.ReadFile(drop)
+	return err == nil && strings.Contains(string(raw), resolverIP)
 }
 
 func check() Status {
@@ -179,7 +198,12 @@ func uninstall(o Options) error {
 	fmt.Fprintf(&b, "rm -f %s %s %s\n", sysctlPath, resolvedDrop, dnsmasqDrop)
 	fmt.Fprintf(&b, "printf %s > %s\n", shellQuote(stripped), hostsPath)
 	b.WriteString("sysctl -q --system 2>/dev/null || true\n")
+	// Restart BOTH: uninstall removes whichever drop-in was written, and the
+	// daemon keeps serving the old config until it re-reads it. Leaving dnsmasq
+	// pointing .doze at a resolver that is gone is a worse state than never
+	// having configured it.
 	b.WriteString("systemctl restart systemd-resolved 2>/dev/null || true\n")
+	b.WriteString("systemctl restart dnsmasq 2>/dev/null || true\n")
 
 	if err := runPrivileged(o, "remove the sysctl, the hosts block and the resolver route", b.String()); err != nil {
 		return err

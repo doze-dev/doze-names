@@ -62,10 +62,23 @@ const (
 	dynamicEnd  = 65
 )
 
-// resolverIP is where the resolver listens on Linux. It is NOT 127.0.0.53:
-// that is systemd-resolved's own stub listener, and binding it would fight the
-// system resolver. Excluded from the dynamic range below.
-const resolverIP = "127.0.0.54"
+// resolverIP is where the resolver listens on Linux — deliberately NOT a
+// loopback address.
+//
+// systemd-resolved refuses loopback addresses as DNS servers outright
+// ("Invalid DNS server address"), and refuses the loopback interface too
+// ("Link lo is loopback device"), so there is no way to point it at anything on
+// 127.0.0.x. Setup therefore gives the resolver an address of its own on a
+// dummy interface, which is structurally what Tailscale does with
+// 100.100.100.100.
+//
+// 192.0.2.0/24 is TEST-NET-1 (RFC 5737), reserved for documentation and
+// guaranteed never to appear on a real network — so a /32 out of it cannot
+// collide with anything the machine legitimately routes to.
+const (
+	resolverIP    = "192.0.2.53"
+	resolverIface = "doze0"
+)
 
 // resolverPort is the port the resolver listens on. Deliberately NOT 53.
 //
@@ -169,8 +182,8 @@ func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 	for i := 0; i < span; i++ {
 		octet := dynamicBase + (start-dynamicBase+i)%span
 		ip := fmt.Sprintf("127.0.0.%d", octet)
-		if ip == resolverIP || taken[ip] {
-			continue
+		if taken[ip] {
+			continue // the resolver is no longer on loopback, so nothing else to dodge
 		}
 		return net.ParseIP(ip), nil
 	}
@@ -180,10 +193,11 @@ func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 // ResolverAddr is where the resolver listens, which differs by platform
 // because the two OSes route a TLD differently.
 //
-// macOS routes a whole TLD via /etc/resolver/doze. Linux has no such hook: the
-// route is a systemd-resolved or dnsmasq drop-in, both of which take an address
-// AND a port, so the resolver sits on a high port there too — on an address of
-// its own, so it never contends with whatever already owns port 53.
+// macOS routes a whole TLD via /etc/resolver/doze, so the resolver sits on
+// loopback there. Linux has no such hook, and systemd-resolved will not accept
+// a loopback server at all, so the resolver takes its own non-loopback address
+// on a dummy interface that setup creates. Both platforms use a high port: 53
+// is held on the wildcard by whatever already serves DNS.
 func ResolverAddr() string {
 	if runtime.GOOS == "linux" {
 		return resolverIP + ":" + resolverPort

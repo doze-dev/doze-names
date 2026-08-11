@@ -24,11 +24,50 @@ import (
 )
 
 const (
-	sysctlPath   = "/etc/sysctl.d/60-doze.conf"
-	resolvedDrop = "/etc/systemd/resolved.conf.d/doze.conf"
-	dnsmasqDrop  = "/etc/dnsmasq.d/doze.conf"
-	resolvConf   = "/etc/resolv.conf"
+	sysctlPath  = "/etc/sysctl.d/60-doze.conf"
+	dnsmasqDrop = "/etc/dnsmasq.d/doze.conf"
+	resolvConf  = "/etc/resolv.conf"
+	unitPath    = "/etc/systemd/system/doze-names.service"
+	unitName    = "doze-names.service"
 )
+
+// zoneUnit creates the resolver's interface and, on a systemd-resolved machine,
+// points resolved at it.
+//
+// It is a unit rather than a config file for two reasons. The interface has to
+// exist at boot, before anything asks for a name. And resolved will only take a
+// per-LINK server — a global DNS= in resolved.conf.d is parsed and then
+// silently dropped when it names a loopback address, which is what the first
+// implementation did and why it never worked. resolvectl writes runtime state
+// that does not survive a reboot, so the unit re-applies it every time.
+//
+// Every ExecStart is prefixed "-": re-running setup must not fail because the
+// link already exists.
+func zoneUnit(routeResolved bool) string {
+	u := `[Unit]
+Description=doze: the ` + Suffix + ` name zone
+After=systemd-resolved.service
+Wants=systemd-resolved.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/sbin/ip link add ` + resolverIface + ` type dummy
+ExecStart=-/sbin/ip addr add ` + resolverIP + `/32 dev ` + resolverIface + `
+ExecStart=-/sbin/ip link set ` + resolverIface + ` up
+`
+	if routeResolved {
+		u += `ExecStart=-/usr/bin/resolvectl dns ` + resolverIface + ` ` + resolverIP + `:` + resolverPort + `
+ExecStart=-/usr/bin/resolvectl domain ` + resolverIface + ` ~` + Suffix + `
+`
+	}
+	u += `ExecStop=-/sbin/ip link del ` + resolverIface + `
+
+[Install]
+WantedBy=multi-user.target
+`
+	return u
+}
 
 // unprivilegedPortStart is what the sysctl must allow: 80, for the shared front
 // door. The resolver no longer needs it — it sits on a high port, because 53 is
@@ -88,13 +127,19 @@ func sysctlInstalled() bool {
 // is dnsmasq running", so checking by manager alone reported a route missing on
 // a machine where it had just been written — a plain resolv.conf with dnsmasq
 // running is exactly that case, and Colima is exactly that machine.
+// resolverRouteInstalled mirrors what install writes, and has to keep
+// mirroring it. Both paths need the interface unit; systemd-resolved needs
+// nothing else, dnsmasq needs its drop-in as well.
 func resolverRouteInstalled(m manager) bool {
-	drop := dnsmasqDrop
-	if m == mgrResolved {
-		drop = resolvedDrop
+	raw, err := os.ReadFile(unitPath)
+	if err != nil || !strings.Contains(string(raw), resolverIP) {
+		return false
 	}
-	raw, err := os.ReadFile(drop)
-	return err == nil && strings.Contains(string(raw), resolverIP)
+	if m == mgrResolved {
+		return strings.Contains(string(raw), "resolvectl")
+	}
+	drop, err := os.ReadFile(dnsmasqDrop)
+	return err == nil && strings.Contains(string(drop), resolverIP)
 }
 
 func check() Status {
@@ -152,17 +197,18 @@ func install(o Options) error {
 	// Written whole rather than appended, so re-running cannot grow the file.
 	fmt.Fprintf(&b, "printf %s > %s\n", shellQuote(wantHosts), hostsPath)
 
-	switch {
-	case m == mgrResolved:
-		fmt.Fprintf(&b, "mkdir -p %s\n", "/etc/systemd/resolved.conf.d")
-		fmt.Fprintf(&b, "printf %s > %s\n",
-			shellQuote(fmt.Sprintf("[Resolve]\nDNS=%s:%s\nDomains=~%s\n", resolverIP, resolverPort, Suffix)), resolvedDrop)
-		b.WriteString("systemctl restart systemd-resolved\n")
-	case dnsmasqPresent():
-		fmt.Fprintf(&b, "mkdir -p %s\n", "/etc/dnsmasq.d")
-		fmt.Fprintf(&b, "printf %s > %s\n",
-			shellQuote(fmt.Sprintf("server=/%s/%s#%s\n", Suffix, resolverIP, resolverPort)), dnsmasqDrop)
-		b.WriteString("systemctl restart dnsmasq 2>/dev/null || true\n")
+	// The resolver's interface, on both paths: it is where the resolver binds,
+	// not only what resolved is pointed at.
+	if canRouteDomain(m, dnsmasqPresent()) {
+		fmt.Fprintf(&b, "printf %s > %s\n", shellQuote(zoneUnit(m == mgrResolved)), unitPath)
+		fmt.Fprintf(&b, "systemctl daemon-reload && systemctl enable --now %s\n", unitName)
+		fmt.Fprintf(&b, "systemctl restart %s\n", unitName)
+		if m != mgrResolved {
+			fmt.Fprintf(&b, "mkdir -p %s\n", "/etc/dnsmasq.d")
+			fmt.Fprintf(&b, "printf %s > %s\n",
+				shellQuote(fmt.Sprintf("server=/%s/%s#%s\n", Suffix, resolverIP, resolverPort)), dnsmasqDrop)
+			b.WriteString("systemctl restart dnsmasq 2>/dev/null || true\n")
+		}
 	}
 
 	what := "apply the sysctl, write the " + hostsPath + " block"
@@ -196,7 +242,10 @@ func uninstall(o Options) error {
 
 	var b strings.Builder
 	b.WriteString("set -e\n")
-	fmt.Fprintf(&b, "rm -f %s %s %s\n", sysctlPath, resolvedDrop, dnsmasqDrop)
+	fmt.Fprintf(&b, "systemctl disable --now %s 2>/dev/null || true\n", unitName)
+	fmt.Fprintf(&b, "ip link del %s 2>/dev/null || true\n", resolverIface)
+	fmt.Fprintf(&b, "rm -f %s %s %s\n", sysctlPath, unitPath, dnsmasqDrop)
+	b.WriteString("systemctl daemon-reload 2>/dev/null || true\n")
 	fmt.Fprintf(&b, "printf %s > %s\n", shellQuote(stripped), hostsPath)
 	b.WriteString("sysctl -q --system 2>/dev/null || true\n")
 	// Restart BOTH: uninstall removes whichever drop-in was written, and the

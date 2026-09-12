@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -157,14 +158,52 @@ func (r *Registry) Snapshot() map[string]Entry {
 // answers for EVERY peer's names, not just this process's — which is what
 // makes any binary able to serve the whole zone.
 func (r *Registry) Resolve(host string) net.IP {
-	if !InZone(host) {
-		return nil
-	}
-	e, ok := r.Snapshot()[normalize(host)]
+	e, ok := r.lookup(host)
 	if !ok {
 		return nil
 	}
 	return net.ParseIP(e.IP).To4()
+}
+
+// lookup finds the entry that owns host: the exact match if there is one,
+// otherwise the nearest registered ancestor. A registered name owns its whole
+// subtree.
+//
+// That is what lets one process answer for names it never registered and could
+// not have registered. doze-aws hands back URLs shaped like AWS's own —
+// sqs.ap-south-1.aws.harbour.doze, x70an6eshc.execute-api.ap-south-1.aws.harbour.doze —
+// and the API Gateway id in the second is minted at runtime. There is no moment
+// at which it could have been claimed in advance, so exact matching cannot serve
+// it even in principle.
+//
+// Two rules keep this from becoming a catch-all, which is the failure this
+// change could easily introduce:
+//
+// The most specific claim wins, because the walk starts at the full name. So an
+// apex holder does not swallow the instances beneath it — aws.doze answers for
+// sqs.ap-south-1.aws.doze while aws.harbour.doze keeps its own subtree.
+//
+// The walk stops before the zone itself. Nothing can own ".doze", so a name
+// nobody claimed is still NXDOMAIN — "a typo fails as a name that does not
+// exist rather than as a connection to the wrong thing", which is the property
+// that makes a wrong name debuggable.
+func (r *Registry) lookup(host string) (Entry, bool) {
+	if !InZone(host) {
+		return Entry{}, false
+	}
+	h := normalize(host)
+	m := r.Snapshot()
+	for h != Suffix {
+		if e, ok := m[h]; ok {
+			return e, true
+		}
+		_, rest, found := strings.Cut(h, ".")
+		if !found {
+			break
+		}
+		h = rest
+	}
+	return Entry{}, false
 }
 
 func normalize(host string) string {

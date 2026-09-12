@@ -143,10 +143,14 @@ func (r *Registry) routeFor(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	if !InZone(host) {
+	// The same walk the resolver uses. If DNS sends a browser to an instance's
+	// address but the front door does not recognise the Host, the request
+	// arrives and is refused — which reads as the service being down.
+	e, ok := r.lookup(host)
+	if !ok {
 		return ""
 	}
-	return r.Snapshot()[normalize(host)].Target
+	return e.Target
 }
 
 // Ingress is the shared front door for as long as this process holds it.
@@ -296,7 +300,7 @@ func routed(r *Registry) []string {
 // up, and with the backend's port when it is not, so callers can print
 // something that actually works either way.
 func (r *Registry) URLFor(host string) string {
-	e, ok := r.Snapshot()[normalize(host)]
+	e, ok := r.lookup(host)
 	if !ok || e.Target == "" {
 		return ""
 	}

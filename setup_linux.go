@@ -192,7 +192,24 @@ func install(o Options) error {
 	fmt.Fprintf(&b, "printf %s > %s\n",
 		shellQuote(fmt.Sprintf("# doze: lets the shared front door bind :80 unprivileged\nnet.ipv4.ip_unprivileged_port_start=%d\n", unprivilegedPortStart)),
 		sysctlPath)
-	b.WriteString("sysctl -q --system\n")
+	// Our own file, and allowed to fail.
+	//
+	// `sysctl --system` was the obvious spelling and it is the wrong one: it
+	// does not apply one key, it REAPPLIES EVERY sysctl.d file on the machine.
+	// Inside a container most of /proc/sys is read-only, so it fails on keys
+	// that have nothing to do with doze — kernel.sysrq, kernel.core_uses_pid,
+	// net.ipv4.conf.* — and `set -e` then aborts the script before the hosts
+	// block is written. The whole install failed for the sake of a setting
+	// nobody asked about.
+	//
+	// `|| true` because this key is the one optional step here. It exists so an
+	// UNPRIVILEGED process can bind :80; a container runs as root and can bind
+	// it anyway, and where it genuinely cannot be set, everything downstream
+	// already copes — ingress logs "names will need their port" at bind time,
+	// Status reports the step as not done, and names still resolve and still
+	// work with their port. Failing the install over it costs the hosts block,
+	// which is the part that matters.
+	fmt.Fprintf(&b, "sysctl -q -p %s || true\n", sysctlPath)
 
 	// Written whole rather than appended, so re-running cannot grow the file.
 	fmt.Fprintf(&b, "printf %s > %s\n", shellQuote(wantHosts), hostsPath)

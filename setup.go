@@ -191,8 +191,19 @@ func runPrivileged(o Options, what, script string) error {
 		fmt.Fprintf(o.out(), "# %s\n%s", what, pasteable(script))
 		return nil
 	}
-	fmt.Fprintf(o.out(), "doze needs sudo once: %s\n", what)
+	// Already root: run it, do not ask a program that is probably not there.
+	//
+	// This is the container case, and it used to fail twice over. `sudo` is
+	// absent from most base images — alpine, debian:stable-slim — so a process
+	// running as uid 0 with every permission it needs would shell out to a
+	// missing binary and report that the privileged step failed. And it said
+	// "doze needs sudo once" while saying it, which is the opposite of true.
 	c := exec.Command("sudo", "sh", "-c", script)
+	if os.Geteuid() == 0 {
+		c = exec.Command("sh", "-c", script)
+	} else {
+		fmt.Fprintf(o.out(), "doze needs sudo once: %s\n", what)
+	}
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, o.out(), os.Stderr
 	if err := c.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "\nthe privileged step failed. To do it by hand:\n\n%s", pasteable(script))

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -189,7 +190,18 @@ func install(o Options) error {
 	var b strings.Builder
 	b.WriteString("set -e\n")
 
-	fmt.Fprintf(&b, "printf %s > %s\n",
+	// mkdir first, and the whole write allowed to fail.
+	//
+	// debian:stable-slim has no /etc/sysctl.d at all, so `printf ... > file`
+	// died with "Directory nonexistent" and `set -e` took the install with it:
+	// doze-aws exited fatally and the container could not start. alpine ships
+	// the directory, which is why this only ever showed up on one of the two
+	// images the docs claimed to cover.
+	//
+	// `|| true` for the same reason the apply below has it — this key is
+	// optional, and nothing downstream depends on the file existing.
+	fmt.Fprintf(&b, "mkdir -p %s && printf %s > %s || true\n",
+		filepath.Dir(sysctlPath),
 		shellQuote(fmt.Sprintf("# doze: lets the shared front door bind :80 unprivileged\nnet.ipv4.ip_unprivileged_port_start=%d\n", unprivilegedPortStart)),
 		sysctlPath)
 	// Our own file, and allowed to fail.

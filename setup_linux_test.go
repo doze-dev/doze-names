@@ -10,6 +10,7 @@ package names
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -77,5 +78,33 @@ func TestAFailedSysctlDoesNotAbortTheInstall(t *testing.T) {
 		t.Errorf("the hosts block is not written after the sysctl:\n%s\n"+
 			"  The sysctl is allowed to fail so that what follows still runs; "+
 			"if nothing follows\n  it, the tolerance is pointless.", script)
+	}
+}
+
+// The sysctl file's DIRECTORY may not exist.
+//
+// debian:stable-slim ships no /etc/sysctl.d, so `printf ... > /etc/sysctl.d/…`
+// failed with "Directory nonexistent" and `set -e` aborted the script before
+// the hosts block was written. doze-aws then exited fatally and the container
+// could not start at all. alpine ships the directory, which is why this
+// survived being "exercised on alpine and debian:stable-slim" in the docs.
+//
+// The key is optional — see the test above — so the write is allowed to fail
+// exactly like the apply is.
+func TestTheSysctlWriteSurvivesAMissingDirectory(t *testing.T) {
+	script := privilegedScript(t)
+
+	dir := filepath.Dir(sysctlPath)
+	if !strings.Contains(script, "mkdir -p "+dir) {
+		t.Errorf("the script writes %s without creating %s first:\n%s\n"+
+			"  An image without that directory fails the write, and `set -e` takes "+
+			"the hosts\n  block down with it.", sysctlPath, dir, script)
+	}
+	// Not a line scan: the printf's argument is a multi-line quoted string, so
+	// the redirect lands several lines below the word printf.
+	if !strings.Contains(script, "> "+sysctlPath+" || true") {
+		t.Errorf("the write to %s is not allowed to fail:\n%s\n"+
+			"  Under `set -e` that aborts the whole install for a setting "+
+			"nothing downstream needs.", sysctlPath, script)
 	}
 }

@@ -42,6 +42,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Suffix is the private TLD every doze name lives under.
@@ -221,3 +222,31 @@ func Home() string {
 	}
 	return filepath.Join(h, "."+Suffix)
 }
+
+// EnvZone turns the zone off for every doze binary at once: DOZE_ZONE=off (or 0,
+// false, no). One switch rather than a flag per binary, so a CI job or a container
+// that has no use for names says so once.
+const EnvZone = "DOZE_ZONE"
+
+// Disabled reports whether the zone has been switched off with DOZE_ZONE.
+func Disabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvZone))) {
+	case "off", "0", "false", "no":
+		return true
+	}
+	return false
+}
+
+// Reachable reports whether something accepts a TCP connection at host:port, so a
+// caller prints a by-name address only if it answers. A name that does not resolve,
+// or resolves to an address nothing listens on, is not worth telling anyone.
+func Reachable(host string, port int) bool {
+	c, err := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprint(port)), reachableWait)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
+const reachableWait = 400 * time.Millisecond

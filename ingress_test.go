@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -132,5 +133,50 @@ func TestFrontDoorContendsOnIPv4(t *testing.T) {
 		t.Error("a second IPv4 wildcard bind succeeded; contention is not real")
 	} else if !isAddrInUse(err) {
 		t.Errorf("second bind failed with %v, want address-in-use", err)
+	}
+}
+
+// The front door is on the wildcard, so it is reachable from the LAN, and what is
+// behind it has no authentication. A peer that is not this machine is refused whatever
+// Host it sends, and before the route lookup, so it learns nothing about what is
+// registered either.
+func TestFrontDoorRefusesPeersThatAreNotThisMachine(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+	defer backend.Close()
+	reg := Open(t.TempDir(), "doze-aws")
+	lease, err := reg.Claim(Apex("aws"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lease.Route(backend.Listener.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	h := proxy(reg)
+
+	for _, tc := range []struct {
+		remote string
+		host   string
+		want   int
+	}{
+		{"127.0.0.1:50000", "aws.doze", http.StatusTeapot},
+		{"127.0.0.17:50000", "aws.doze", http.StatusTeapot}, // another loopback address of this machine
+		{"[::1]:50000", "aws.doze", http.StatusTeapot},
+		{"192.168.1.20:50000", "aws.doze", http.StatusForbidden},
+		{"203.0.113.9:50000", "aws.doze", http.StatusForbidden},
+		{"192.168.1.20:50000", "nope.doze", http.StatusForbidden}, // not even a 404 that lists the routes
+		{"not-an-address", "aws.doze", http.StatusForbidden},
+	} {
+		req := httptest.NewRequest("GET", "http://"+tc.host+"/", nil)
+		req.RemoteAddr = tc.remote
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != tc.want {
+			t.Errorf("peer %s, Host %s: status %d, want %d", tc.remote, tc.host, rec.Code, tc.want)
+		}
+		if tc.want == http.StatusForbidden && strings.Contains(rec.Body.String(), "127.0.0") {
+			t.Errorf("a refused peer was told about the routes:\n%s", rec.Body.String())
+		}
 	}
 }

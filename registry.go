@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // FileName is the registry's name inside the doze home.
@@ -238,10 +237,11 @@ func (r *Registry) update(fn func(map[string]Entry) error) error {
 		return err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	unlock, err := lockFile(lock)
+	if err != nil {
 		return err
 	}
-	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+	defer unlock()
 
 	m := map[string]Entry{}
 	switch raw, err := os.ReadFile(r.path); {
@@ -273,19 +273,4 @@ func (r *Registry) update(fn func(map[string]Entry) error) error {
 		return err
 	}
 	return os.Rename(tmp, r.path)
-}
-
-// alive reports whether a process exists. Signal 0 checks for existence
-// without delivering anything; EPERM means it exists and belongs to someone
-// else, which still counts as alive.
-func alive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = p.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
 }

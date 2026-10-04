@@ -261,6 +261,17 @@ func proxy(r *Registry) http.Handler {
 		},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// The front door binds the wildcard (see ingressBind), so it is reachable from
+		// the network the machine is plugged into, and the services behind it are
+		// development fixtures with no authentication: a console that lets anyone
+		// reach anything. Anyone on the LAN who sends "Host: kafka.myproject.doze"
+		// would otherwise be proxied straight to it. A name is a local convenience, so
+		// only this machine is answered. This is checked before the route lookup so a
+		// refused peer also learns nothing about what is registered.
+		if !fromThisMachine(req.RemoteAddr) {
+			http.Error(w, "doze names are served to this machine only", http.StatusForbidden)
+			return
+		}
 		if r.routeFor(req.Host) == "" {
 			// Not ours. Say which names this machine does front, because the
 			// usual cause is a service that is not running.
@@ -270,6 +281,17 @@ func proxy(r *Registry) http.Handler {
 		}
 		rp.ServeHTTP(w, req)
 	})
+}
+
+// fromThisMachine reports whether a connection's peer address is loopback. A
+// RemoteAddr that cannot be parsed is not trusted.
+func fromThisMachine(remote string) bool {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		host = remote
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func hostOnly(host string) string {

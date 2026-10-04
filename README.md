@@ -97,6 +97,28 @@ Registry: `<home>/names.json`. Liveness is by PID rather than clean shutdown,
 because a crashed process cannot run a shutdown hook — every read prunes entries
 whose process is gone, so the file self-heals and `kill -9` costs nothing.
 
+## The front door answers this machine only
+
+The shared HTTP front door (`:80`, routing by `Host`) binds the IPv4 wildcard on
+purpose: every name resolves to its own `127.0.0.x` address, and macOS will not let an
+unprivileged process hold `:80` on a specific one. So it is reachable from the network
+the machine is plugged into, and what sits behind it (development consoles, no
+authentication) must not be. It answers loopback peers and refuses every other with
+`403`, before looking at the route, so a refused peer learns nothing about what is
+registered.
+
+## One switch, and a check
+
+`DOZE_ZONE=off` (`names.Disabled()`) switches the zone off for every doze binary at
+once. `names.Reachable(host, port)` reports whether something answers, so a caller
+prints a by-name address only if it works.
+
+## Windows
+
+The registry, resolver and front door build for Windows (the registry lock uses
+`LockFileEx`). Machine setup does not exist there yet: `Check` reports one step that
+is not done, and `Install` and `Uninstall` say so rather than succeeding.
+
 ## Status
 
 Pre-1.0. The wire handling is ported from doze core's resolver rather than

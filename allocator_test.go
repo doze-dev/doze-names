@@ -146,3 +146,14 @@ func TestAFullPoolSaysSo(t *testing.T) {
 		t.Fatalf("the 246th service = %v, want an error saying the pool is in use", err)
 	}
 }
+
+// On a machine with no setup every name resolves to 127.0.0.1. That address is
+// shared on purpose and must never be refused.
+func TestClaimAtSharesTheLoopbackAddress(t *testing.T) {
+	r := Open(t.TempDir(), "doze")
+	for _, svc := range []string{"db", "cache", "api"} {
+		if _, err := r.ClaimAt(Qualified(svc, "shop"), net.ParseIP("127.0.0.1")); err != nil {
+			t.Fatalf("%s at 127.0.0.1: %v", svc, err)
+		}
+	}
+}

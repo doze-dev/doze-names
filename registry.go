@@ -127,9 +127,12 @@ type Lease struct {
 // to. An apex name held by another live process returns ErrHeld and no lease.
 func (r *Registry) Claim(n Name) (*Lease, error) { return r.claim(n, nil) }
 
-// ClaimAt registers a name at an address the caller picked. It is refused if
-// a different live name already resolves there: two names on one address would
-// send each other's clients to whichever service bound the port first.
+// ClaimAt registers a name at an address the caller picked. If the address is
+// one of the pool's, it is refused when a different live name already resolves
+// there: the pool exists to give each name an address of its own, and two
+// names on one would send each other's clients to whichever service bound the
+// port first. An address outside the pool — 127.0.0.1, where everything
+// listens on a machine with no setup — is shared by design and never refused.
 func (r *Registry) ClaimAt(n Name, ip net.IP) (*Lease, error) { return r.claim(n, ip) }
 
 func (r *Registry) claim(n Name, want net.IP) (*Lease, error) {
@@ -152,7 +155,7 @@ func (r *Registry) claim(n Name, want net.IP) (*Lease, error) {
 			if ip, err = addressFor(n, taken); err != nil {
 				return err
 			}
-		} else if taken[ip.String()] {
+		} else if inPool(ip) && taken[ip.String()] {
 			for host, e := range m {
 				if host != n.Host && e.IP == ip.String() {
 					return &ErrAddrTaken{IP: ip.String(), Host: host, PID: e.PID, Owner: e.Owner}
@@ -386,4 +389,11 @@ func (r *Registry) ClaimStack(name, dir string) (release func(), err error) {
 func ReservedStack(name string) bool {
 	_, ok := apexIP[label(name)]
 	return ok
+}
+
+// inPool reports whether ip is one of the addresses this package hands out:
+// 127.0.0.2 to 127.0.0.254.
+func inPool(ip net.IP) bool {
+	v4 := ip.To4()
+	return v4 != nil && v4[0] == 127 && v4[1] == 0 && v4[2] == 0 && int(v4[3]) >= apexBase && int(v4[3]) <= dynamicEnd
 }

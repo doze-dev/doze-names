@@ -59,6 +59,15 @@ func ServeResolve(ctx context.Context, resolve Resolve, logf func(string, ...any
 	return serveWith(ctx, resolve, ResolverAddr(), logf, nil)
 }
 
+// ServeResolveIn is ServeResolve for a host that is also a peer in the
+// registry: while it holds the socket it is recorded there as the zone's DNS
+// server, like any other peer. Without that, the others cannot tell a doze
+// program serving the zone from a stranger on the port, and say the wrong
+// thing about why they are standing by.
+func ServeResolveIn(ctx context.Context, reg *Registry, resolve Resolve, logf func(string, ...any)) *Server {
+	return serveWith(ctx, resolve, ResolverAddr(), logf, reg)
+}
+
 // ServeAt is Serve on a specific address. The zone's address is fixed per
 // platform, so this exists for tests — and for anyone routing the zone
 // somewhere unusual, where the peer protocol still holds as long as every peer

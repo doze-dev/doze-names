@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -116,4 +117,27 @@ func queryA(t *testing.T, server, host string) string {
 	}
 	a := buf[n-4 : n]
 	return net.IPv4(a[0], a[1], a[2], a[3]).String()
+}
+
+// A host that answers from its own view of its names is still a peer: while it
+// serves, the registry says so.
+func TestServeResolveInRecordsTheHolder(t *testing.T) {
+	t.Setenv(EnvResolver, freeAddr(t, "udp"))
+	reg := Open(t.TempDir(), "doze")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	srv := ServeResolveIn(ctx, reg, func(string) net.IP { return net.ParseIP("127.0.0.77").To4() }, nil)
+	if !srv.Bound(ctx) {
+		t.Fatal("did not bind")
+	}
+	if h, ok := reg.ResolverHolder(); !ok || h.Owner != "doze" || h.PID != os.Getpid() {
+		t.Fatalf("holder = %+v (present %v), want doze, this process", h, ok)
+	}
+	if got := queryA(t, ResolverAddr(), "anything.shop.doze"); got != "127.0.0.77" {
+		t.Fatalf("the host's own resolver should answer, got %q", got)
+	}
+	srv.Close()
+	if _, ok := reg.ResolverHolder(); ok {
+		t.Fatal("the holder must be cleared when it stops serving")
+	}
 }

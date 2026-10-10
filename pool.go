@@ -146,10 +146,10 @@ func gatewayUp() bool {
 // name lands on the same address run after run without anything having to be
 // persisted. taken lets the caller exclude addresses live peers already hold.
 //
-// It prefers an address this machine can use. If none of the free ones can be
-// — macOS before setup — it falls back to the hash alone, so the name still
-// has an address and the caller learns the rest when it tries to listen, which
-// is how every caller already handles a machine that is not set up.
+// Whether the machine can use the address is not asked here: either all of the
+// block is usable or none of it is (see PoolUsable), so on a Mac with no setup
+// the name still has the address its hash gives, and the caller learns the
+// rest when it tries to listen.
 func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 	if n.Tier == TierApex {
 		ip, ok := apexAddr(n.service())
@@ -164,7 +164,6 @@ func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 	_, _ = h.Write([]byte(n.Host))
 	start := int(h.Sum32() % uint32(blockSlots))
 	// Probe forward so a collision with a live peer shifts rather than fails.
-	var firstFree net.IP
 	for i := 0; i < blockSlots; i++ {
 		off := slotOffset((start + i) % blockSlots)
 		if off < dynamicBase {
@@ -174,18 +173,7 @@ func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 		if taken[ip.String()] {
 			continue
 		}
-		if canBind(ip.String()) {
-			return ip, nil
-		}
-		if firstFree == nil {
-			firstFree = ip
-		}
-		if zone.virtual {
-			break // the daemon is down: no other address will do better
-		}
-	}
-	if firstFree != nil {
-		return firstFree, nil
+		return ip, nil
 	}
 	return nil, fmt.Errorf("every address in %s is in use by a running doze service", zone.cidr())
 }

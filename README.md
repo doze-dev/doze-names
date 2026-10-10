@@ -43,33 +43,62 @@ it nothing functional.
 
 ## Every name gets its own address
 
-Names resolve to their own loopback address rather than a shared `127.0.0.1`.
+Names resolve to an address of their own rather than a shared `127.0.0.1`.
 That is what lets each service hold its **canonical** port — every Kafka on
-9092, every local AWS on 80 — instead of a hand-picked high one, and it means
+9092, every Postgres on 5432 — instead of a hand-picked high one, and it means
 `http://aws.doze` is the same URL whether a standalone process or a stack
 instance is behind it.
 
+An address is a block plus an offset. The offset belongs to the name and is
+the same on every system; the block is the machine's.
+
 ```
-127.0.0.2      aws.doze          reserved, fixed
-127.0.0.3      kafka.doze        reserved, fixed
-127.0.0.4-9    held for future apex names
-127.0.0.10-254 qualified names, hashed by host
+offset 2        aws.doze          reserved, fixed
+offset 3        kafka.doze        reserved, fixed
+offset 4-9      held for future apex names
+offset 10 up    qualified names, hashed by host — about 32,000 of them
 ```
 
-How much of that last range a machine has depends on the machine. On Linux all
-of `127.0.0.0/8` is local, so the whole range is there: 245 addresses. On
-macOS an address exists only once it is aliased onto `lo0`, and setup aliases
-up to `.65` — 56 addresses — on purpose: `mDNSResponder` registers every
-interface address, and a few hundred aliases have been seen to peg it. A name
-is hashed into the part of the range its platform has, and an address is
-handed out only if this machine can actually listen on it.
+| | Block | How a service gets its address |
+|---|---|---|
+| Linux, Windows | `127.0.0.0/17` | It binds it. All of `127.0.0.0/8` is local, and nothing has to run. |
+| macOS | `198.19.0.0/17` | It never binds it. Setup installs a small network daemon; the service listens on a private port and the daemon translates. |
+
+macOS is different because a loopback address exists there only once it has
+been aliased onto `lo0`, and aliasing them in bulk is not survivable. Measured
+on macOS 27: 250 more aliases took `mDNSResponder` to 100% of a core and a name
+lookup from 10 ms to over a second; 4,000 took a lookup to 150 seconds and
+`configd` was killed by its watchdog. So instead of an address per service
+there is one interface with the whole block routed to it, held by the daemon.
+It opens the interface and adds the route as root, then drops to the user who
+ran setup and does nothing but rewrite packets between a service's public
+address and its private port. It keeps no connection state, so restarting it
+loses nothing. CI runs it for real on macOS 14, 15 and 26: 2,000 services on
+one port, `mDNSResponder` idle throughout, 2.6 to 4 Gbit/s through it.
+
+The daemon is a copy of whichever doze program ran setup, started with a
+private argument. Every program's `main` therefore begins with
+`names.Helper()`, which is where that copy becomes the daemon.
+
+### Listening
+
+```go
+lease, _ := reg.Claim(names.Qualified("db", "shop"))
+ln, err := lease.Listen(5432)        // db.shop.doze:5432, on either system
+```
+
+`Listen` binds the address where it can and registers a private port where it
+cannot; the listener reports the public address either way. For a server the
+program starts but does not run in-process, `lease.BindAddr()` is the address
+to have it listen on and `lease.Forward(public, private)` registers the port.
 
 `Claim` is the one allocator for the machine. It runs under the registry's
 lock, so two programs cannot be given one address, and releasing a name gives
 its address back at once. `ClaimAt` is for a caller that needs a particular
 address; it is refused if another live name already resolves there.
 `127.0.0.1` is the exception: on a machine with no setup everything listens
-there, so it is shared by design.
+there, so it is shared by design. `PoolUsable` says which of the two a machine
+is.
 
 Apex addresses are **fixed rather than allocated**, because on Linux they are
 written into `/etc/hosts` once at setup, before anything is running. A static
@@ -85,7 +114,7 @@ people's `/etc/hosts`.
 ```go
 reg := names.Open(home, "doze-aws")
 
-lease, err := reg.Claim(names.Apex("aws"))   // → 127.0.0.2
+lease, err := reg.Claim(names.Apex("aws"))   // → 127.0.0.2, or 198.19.0.2 on a Mac
 defer lease.Release()
 
 srv := names.Serve(ctx, reg, log.Printf)     // binds if free, stands by if not
@@ -127,10 +156,11 @@ because they are a standalone tool's.
 ## The front door answers this machine only
 
 The shared HTTP front door (`:80`, routing by `Host`) binds the IPv4 wildcard on
-purpose: every name resolves to its own `127.0.0.x` address, and macOS will not let an
-unprivileged process hold `:80` on a specific one. So it is reachable from the network
+purpose: a name's address is not one a Mac can bind, and on Linux an unprivileged process
+cannot be given `:80` on each of them. So it is reachable from the network
 the machine is plugged into, and what sits behind it (development consoles, no
-authentication) must not be. It answers loopback peers and refuses every other with
+authentication) must not be. It answers peers on this machine — loopback, and on a Mac the block the daemon
+translates — and refuses every other with
 `403`, before looking at the route, so a refused peer learns nothing about what is
 registered.
 

@@ -98,19 +98,20 @@ func TestNoSetupStillNamesAnAddress(t *testing.T) {
 
 // Releasing a name gives its address back at once.
 func TestAReleasedAddressIsReused(t *testing.T) {
-	// One usable address, so the second claim can only succeed by reusing it.
-	machine(t, loopbackNet, func(ip string) bool { return ip == "127.0.0.42" })
+	machine(t, loopbackNet, all)
 	r := Open(t.TempDir(), "doze")
 	first, err := r.Claim(Qualified("old", "shop"))
-	if err != nil || first.IP.String() != "127.0.0.42" {
-		t.Fatalf("first claim = %v, %v; want 127.0.0.42", first, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ClaimAt(Qualified("new", "shop"), first.IP); err == nil {
+		t.Fatalf("%s was given to a second name while the first held it", first.IP)
 	}
 	if err := first.Release(); err != nil {
 		t.Fatal(err)
 	}
-	second, err := r.Claim(Qualified("new", "shop"))
-	if err != nil || second.IP.String() != "127.0.0.42" {
-		t.Fatalf("after the release, the next claim got %v, %v; want the freed 127.0.0.42", second.IP, err)
+	if _, err := r.ClaimAt(Qualified("new", "shop"), first.IP); err != nil {
+		t.Fatalf("after the release, claiming the freed %s: %v", first.IP, err)
 	}
 }
 

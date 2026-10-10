@@ -189,13 +189,13 @@ func ServeIngress(ctx context.Context, r *Registry, logf func(string, ...any)) *
 			ln, err := net.Listen(ingressNetwork, bind)
 			switch {
 			case err == nil:
+				r.claimIngress(bind)
 				select {
 				case <-in.bound:
 				default:
 					close(in.bound)
 				}
 				logf("names: fronting %s on %s", Suffix, bind)
-				r.claimIngress(bind)
 				announced = false
 				srv := &http.Server{Handler: proxy(r)}
 				go func() { <-ctx.Done(); _ = srv.Close() }()

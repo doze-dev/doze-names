@@ -90,15 +90,17 @@ func serveWith(ctx context.Context, resolve Resolve, addr string, logf func(stri
 			conn, err := listen(addr)
 			switch {
 			case err == nil:
+				// Recorded before Bound is released: whoever waited for the socket
+				// may ask the registry who has it straight away.
+				if reg != nil {
+					reg.claimResolver(addr)
+				}
 				select {
 				case <-s.bound:
 				default:
 					close(s.bound)
 				}
 				logf("names: serving %s on %s", Suffix, addr)
-				if reg != nil {
-					reg.claimResolver(addr)
-				}
 				announced = false
 				serveConn(ctx, conn, resolve)
 				if reg != nil {

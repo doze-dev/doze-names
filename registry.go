@@ -92,6 +92,19 @@ func (e *ErrHeld) Error() string {
 	return fmt.Sprintf("%s is held by pid %d (%s)", e.Host, e.PID, e.Owner)
 }
 
+// ErrAddrTaken reports that the address asked for in ClaimAt already belongs to
+// another live name.
+type ErrAddrTaken struct {
+	IP    string
+	Host  string // the name that has it
+	PID   int
+	Owner string
+}
+
+func (e *ErrAddrTaken) Error() string {
+	return fmt.Sprintf("%s is the address of %s (pid %d, %s)", e.IP, e.Host, e.PID, e.Owner)
+}
+
 // Held returns the ErrHeld in err, if any — so a caller can log who holds the
 // name and carry on rather than treating it as fatal.
 func Held(err error) (*ErrHeld, bool) {
@@ -114,10 +127,9 @@ type Lease struct {
 // to. An apex name held by another live process returns ErrHeld and no lease.
 func (r *Registry) Claim(n Name) (*Lease, error) { return r.claim(n, nil) }
 
-// ClaimAt registers a name at an address the caller picked, for a host that
-// runs its own allocator — doze core assigns per-(stack, service) addresses and
-// persists them, so its names must keep the addresses it already handed out
-// rather than be rehashed here.
+// ClaimAt registers a name at an address the caller picked. It is refused if
+// a different live name already resolves there: two names on one address would
+// send each other's clients to whichever service bound the port first.
 func (r *Registry) ClaimAt(n Name, ip net.IP) (*Lease, error) { return r.claim(n, ip) }
 
 func (r *Registry) claim(n Name, want net.IP) (*Lease, error) {
@@ -130,7 +142,7 @@ func (r *Registry) claim(n Name, want net.IP) (*Lease, error) {
 		}
 		taken := map[string]bool{}
 		for host, e := range m {
-			if host != n.Host {
+			if host != n.Host && e.IP != "" {
 				taken[e.IP] = true
 			}
 		}
@@ -139,6 +151,12 @@ func (r *Registry) claim(n Name, want net.IP) (*Lease, error) {
 			var err error
 			if ip, err = addressFor(n, taken); err != nil {
 				return err
+			}
+		} else if taken[ip.String()] {
+			for host, e := range m {
+				if host != n.Host && e.IP == ip.String() {
+					return &ErrAddrTaken{IP: ip.String(), Host: host, PID: e.PID, Owner: e.Owner}
+				}
 			}
 		}
 		// Keep any route this process already published, so re-claiming a name

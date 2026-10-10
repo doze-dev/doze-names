@@ -52,16 +52,33 @@ const Suffix = "doze"
 // names take fixed addresses from the head so they can be written to
 // /etc/hosts before any process exists; qualified names are placed in the tail.
 //
-// Note dynamicBase is 10, not 2: doze core's allocator started at 2, so the
-// head has to be carved out of what it used to hand out. See the migration
-// note in the spec — an apex claim must tolerate finding its address already
-// taken by an older stack rather than binding something it does not own.
+// The tail runs to .254: one address per service for the whole machine, across
+// every stack and standalone tool running at once. It used to end at .65, and
+// a machine set up then has only that much aliased until setup is run again;
+// addressFor hands out what is actually there (see canBind).
 const (
 	apexBase    = 2
 	apexEnd     = 9
 	dynamicBase = 10
-	dynamicEnd  = 65
+	dynamicEnd  = 254
 )
+
+// legacyDynamicEnd is where the pool ended before it was widened: what an
+// earlier setup aliased on macOS.
+const legacyDynamicEnd = 65
+
+// canBind reports whether this machine can listen on a loopback address right
+// now. On Linux every 127.x.y.z address is local. On macOS only the ones setup
+// aliased onto lo0 are, so an address from the pool is not usable just because
+// it is free. A variable so a test can stand in a machine of its choosing.
+var canBind = func(ip string) bool {
+	l, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
 
 // resolverIP is where the resolver listens on Linux — deliberately NOT a
 // loopback address.
@@ -165,6 +182,11 @@ func label(s string) string {
 // range so the same name lands on the same address run after run without
 // anything having to be persisted. taken lets the caller exclude addresses
 // live peers already hold.
+//
+// It prefers an address this machine can listen on. If none of the free ones
+// can be — macOS before setup — it falls back to the hash alone, so the name
+// still has an address and the caller learns the rest when it tries to bind,
+// which is how every caller already handles a machine that is not set up.
 func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 	if n.Tier == TierApex {
 		ip, ok := apexIP[n.service()]
@@ -180,15 +202,24 @@ func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 	span := dynamicEnd - dynamicBase + 1
 	start := int(h.Sum32()%uint32(span)) + dynamicBase
 	// Probe forward so a collision with a live peer shifts rather than fails.
+	firstFree := ""
 	for i := 0; i < span; i++ {
 		octet := dynamicBase + (start-dynamicBase+i)%span
 		ip := fmt.Sprintf("127.0.0.%d", octet)
 		if taken[ip] {
-			continue // the resolver is no longer on loopback, so nothing else to dodge
+			continue
 		}
-		return net.ParseIP(ip), nil
+		if firstFree == "" {
+			firstFree = ip
+		}
+		if canBind(ip) {
+			return net.ParseIP(ip), nil
+		}
 	}
-	return nil, fmt.Errorf("loopback range 127.0.0.%d-%d is full", dynamicBase, dynamicEnd)
+	if firstFree != "" {
+		return net.ParseIP(firstFree), nil
+	}
+	return nil, fmt.Errorf("every address in 127.0.0.%d-%d is in use by a running doze service", dynamicBase, dynamicEnd)
 }
 
 // ResolverAddr is where the resolver listens, which differs by platform

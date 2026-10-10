@@ -48,14 +48,11 @@ func launchdPlist() string {
 // aliasesAvailable reports whether the pool is actually usable, by binding one
 // of it. Checking ifconfig output would be checking what was configured; this
 // checks what works.
-func aliasesAvailable() bool {
-	l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.%d:0", apexBase))
-	if err != nil {
-		return false
-	}
-	_ = l.Close()
-	return true
-}
+func aliasesAvailable() bool { return canBind(fmt.Sprintf("127.0.0.%d", apexBase)) }
+
+// poolComplete reports whether the whole pool is aliased, not just the part an
+// earlier setup knew about.
+func poolComplete() bool { return canBind(fmt.Sprintf("127.0.0.%d", dynamicEnd)) }
 
 func resolverInstalled() bool {
 	raw, err := os.ReadFile(resolverFile)
@@ -71,10 +68,16 @@ func check() Status {
 	st := Status{Platform: "darwin"}
 
 	detail := "127.0.0." + fmt.Sprint(apexBase) + "-" + fmt.Sprint(dynamicEnd) + " aliased on lo0"
-	if !aliasesAvailable() {
+	switch {
+	case !aliasesAvailable():
 		detail = "not aliased — services cannot hold canonical ports"
+	case !poolComplete():
+		// Set up before the pool was widened. What is there works; there is
+		// just less of it.
+		detail = fmt.Sprintf("only 127.0.0.%d-%d is aliased, from an earlier setup — run setup again for the rest (to .%d)",
+			apexBase, legacyDynamicEnd, dynamicEnd)
 	}
-	st.Steps = append(st.Steps, Step{Name: "loopback pool", Done: aliasesAvailable(), Detail: detail})
+	st.Steps = append(st.Steps, Step{Name: "loopback pool", Done: aliasesAvailable() && poolComplete(), Detail: detail})
 
 	detail = resolverFile + " → " + ResolverAddr()
 	if !resolverInstalled() {
@@ -116,7 +119,8 @@ printf 'nameserver 127.0.0.1\nport %s\n' > %s`,
 
 	// launchd applies RunAtLoad asynchronously, so the aliases can land a beat
 	// after launchctl returns.
-	for i := 0; i < 20 && !aliasesAvailable(); i++ {
+	// The last address is the last one the job aliases, so it is the one to wait for.
+	for i := 0; i < 40 && !poolComplete(); i++ {
 		time.Sleep(150 * time.Millisecond)
 	}
 	if !aliasesAvailable() {

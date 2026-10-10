@@ -129,10 +129,10 @@ var canBind = func(ip string) bool {
 // daemon is running. A daemon translating from another home's registry is
 // not this zone's: a zone moved with DOZE_HOME has no daemon, and its
 // services listen on 127.0.0.1.
-func gatewayUp() bool {
-	if !servesHome() {
-		return false
-	}
+func gatewayUp() bool { return servesHome() && gatewayPresent() }
+
+// gatewayPresent reports whether some interface has the gateway address.
+func gatewayPresent() bool {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return false

@@ -25,7 +25,11 @@ func e2e(t *testing.T) *Registry {
 	if os.Getenv("DOZE_NAMES_E2E") == "" {
 		t.Skip("needs a machine with the network daemon installed; set DOZE_NAMES_E2E=1 on one that can be thrown away")
 	}
-	machine(t, virtualNet, canBindReal)
+	usable := canBindReal
+	if foreground() {
+		usable = func(string) bool { return gatewayPresent() }
+	}
+	machine(t, virtualNet, usable)
 	if !PoolUsable() {
 		t.Fatalf("the network daemon is not running:\n%s", Check())
 	}
@@ -39,6 +43,12 @@ func e2e(t *testing.T) *Registry {
 	}
 	return Open(Home(), "e2e")
 }
+
+// foreground reports a daemon started by hand for this run (DOZE_NAMES_E2E=foreground)
+// and not installed: no launchd job, and a home of the test's own, so nothing
+// of the machine's real zone is touched. What needs the installed daemon or
+// the system resolver is skipped.
+func foreground() bool { return os.Getenv("DOZE_NAMES_E2E") == "foreground" }
 
 // canBindReal is canBind as it is outside the tests.
 var canBindReal = canBind
@@ -180,6 +190,9 @@ func TestNetworkPing(t *testing.T) {
 // by the front door.
 func TestNetworkByName(t *testing.T) {
 	r := e2e(t)
+	if foreground() {
+		t.Skip("uses the system resolver and the machine's real zone")
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	dns, front := Serve(ctx, r, t.Logf), ServeIngress(ctx, r, t.Logf)
@@ -307,6 +320,9 @@ func TestNetworkThroughput(t *testing.T) {
 // when the daemon comes back.
 func TestNetworkDaemonRestart(t *testing.T) {
 	r := e2e(t)
+	if foreground() {
+		t.Skip("restarts the installed daemon")
+	}
 	lease, err := r.Claim(Qualified("db", "restart"))
 	if err != nil {
 		t.Fatal(err)

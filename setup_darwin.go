@@ -24,10 +24,11 @@ const (
 	resolverFile = "/etc/resolver/" + Suffix
 )
 
-// launchdPlist aliases the whole pool at boot and, via RunAtLoad, right now.
+// launchdPlist aliases the Mac's share of the pool at boot and, via RunAtLoad,
+// right now.
 func launchdPlist() string {
 	script := fmt.Sprintf("for i in $(seq %d %d); do /sbin/ifconfig lo0 alias 127.0.0.$i up; done",
-		apexBase, dynamicEnd)
+		apexBase, macAliasEnd)
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -50,10 +51,6 @@ func launchdPlist() string {
 // checks what works.
 func aliasesAvailable() bool { return canBind(fmt.Sprintf("127.0.0.%d", apexBase)) }
 
-// poolComplete reports whether the whole pool is aliased, not just the part an
-// earlier setup knew about.
-func poolComplete() bool { return canBind(fmt.Sprintf("127.0.0.%d", dynamicEnd)) }
-
 func resolverInstalled() bool {
 	raw, err := os.ReadFile(resolverFile)
 	if err != nil {
@@ -67,17 +64,11 @@ func resolverInstalled() bool {
 func check() Status {
 	st := Status{Platform: "darwin"}
 
-	detail := "127.0.0." + fmt.Sprint(apexBase) + "-" + fmt.Sprint(dynamicEnd) + " aliased on lo0"
-	switch {
-	case !aliasesAvailable():
+	detail := "127.0.0." + fmt.Sprint(apexBase) + "-" + fmt.Sprint(macAliasEnd) + " aliased on lo0"
+	if !aliasesAvailable() {
 		detail = "not aliased — services cannot hold canonical ports"
-	case !poolComplete():
-		// Set up before the pool was widened. What is there works; there is
-		// just less of it.
-		detail = fmt.Sprintf("only 127.0.0.%d-%d is aliased, from an earlier setup — run setup again for the rest (to .%d)",
-			apexBase, legacyDynamicEnd, dynamicEnd)
 	}
-	st.Steps = append(st.Steps, Step{Name: "loopback pool", Done: aliasesAvailable() && poolComplete(), Detail: detail})
+	st.Steps = append(st.Steps, Step{Name: "loopback pool", Done: aliasesAvailable(), Detail: detail})
 
 	detail = resolverFile + " → " + ResolverAddr()
 	if !resolverInstalled() {
@@ -119,8 +110,7 @@ printf 'nameserver 127.0.0.1\nport %s\n' > %s`,
 
 	// launchd applies RunAtLoad asynchronously, so the aliases can land a beat
 	// after launchctl returns.
-	// The last address is the last one the job aliases, so it is the one to wait for.
-	for i := 0; i < 40 && !poolComplete(); i++ {
+	for i := 0; i < 20 && !aliasesAvailable(); i++ {
 		time.Sleep(150 * time.Millisecond)
 	}
 	if !aliasesAvailable() {

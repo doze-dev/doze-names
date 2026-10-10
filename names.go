@@ -52,10 +52,14 @@ const Suffix = "doze"
 // names take fixed addresses from the head so they can be written to
 // /etc/hosts before any process exists; qualified names are placed in the tail.
 //
-// The tail runs to .254: one address per service for the whole machine, across
-// every stack and standalone tool running at once. It used to end at .65, and
-// a machine set up then has only that much aliased until setup is run again;
-// addressFor hands out what is actually there (see canBind).
+// The tail runs to .254, and how much of it a machine can use depends on the
+// machine. On Linux all of 127.0.0.0/8 is local, so every address is there for
+// free. On macOS an address exists only once it has been aliased onto lo0, and
+// setup aliases only up to macAliasEnd, on purpose: mDNSResponder registers
+// every interface address, and a few hundred aliases have been seen to peg it.
+// So a Mac has 56 addresses for services and Linux has 245. addressFor hands
+// out what is actually there (see canBind), which is what makes one range
+// serve both.
 const (
 	apexBase    = 2
 	apexEnd     = 9
@@ -63,9 +67,9 @@ const (
 	dynamicEnd  = 254
 )
 
-// legacyDynamicEnd is where the pool ended before it was widened: what an
-// earlier setup aliased on macOS.
-const legacyDynamicEnd = 65
+// macAliasEnd is the last address macOS setup aliases onto lo0. Raising it is
+// not free: see the note on the range above, and measure mDNSResponder first.
+const macAliasEnd = 65
 
 // canBind reports whether this machine can listen on a loopback address right
 // now. On Linux every 127.x.y.z address is local. On macOS only the ones setup

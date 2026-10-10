@@ -23,7 +23,7 @@ func machine(t *testing.T, bindable func(octet int) bool) {
 func lastOctet(ip net.IP) int { return int(ip.To4()[3]) }
 
 func TestThePoolRunsTo254AndANameKeepsItsAddress(t *testing.T) {
-	machine(t, func(int) bool { return true }) // Linux, or macOS after a current setup
+	machine(t, func(int) bool { return true }) // Linux: the whole range is local
 	r := Open(t.TempDir(), "doze")
 	seen := map[int]bool{}
 	high := false
@@ -40,10 +40,10 @@ func TestThePoolRunsTo254AndANameKeepsItsAddress(t *testing.T) {
 			t.Fatalf("127.0.0.%d was handed out twice", o)
 		}
 		seen[o] = true
-		high = high || o > legacyDynamicEnd
+		high = high || o > macAliasEnd
 	}
 	if !high {
-		t.Fatalf("120 services all fit below .%d: the wider pool is not being used", legacyDynamicEnd)
+		t.Fatalf("120 services all fit below .%d: the wider pool is not being used", macAliasEnd)
 	}
 	// The same name asks again, from a fresh registry: the same address.
 	a, _ := Open(t.TempDir(), "doze").Claim(Qualified("db", "shop"))
@@ -53,18 +53,18 @@ func TestThePoolRunsTo254AndANameKeepsItsAddress(t *testing.T) {
 	}
 }
 
-// A Mac set up before the pool was widened has only .2 to .65. Everything
-// handed out there must be an address it can actually listen on.
-func TestAnOlderSetupGetsOnlyWhatItHas(t *testing.T) {
-	machine(t, func(o int) bool { return o >= apexBase && o <= legacyDynamicEnd })
+// A Mac has only .2 to .65 aliased. Everything handed out there must be an
+// address it can actually listen on.
+func TestAMacGetsOnlyWhatItHasAliased(t *testing.T) {
+	machine(t, func(o int) bool { return o >= apexBase && o <= macAliasEnd })
 	r := Open(t.TempDir(), "doze")
-	n := legacyDynamicEnd - dynamicBase + 1
+	n := macAliasEnd - dynamicBase + 1
 	for i := 0; i < n; i++ {
 		lease, err := r.Claim(Qualified(fmt.Sprintf("svc%d", i), "shop"))
 		if err != nil {
 			t.Fatalf("claim %d: %v", i, err)
 		}
-		if o := lastOctet(lease.IP); o > legacyDynamicEnd {
+		if o := lastOctet(lease.IP); o > macAliasEnd {
 			t.Fatalf("svc%d got 127.0.0.%d, which this machine cannot bind", i, o)
 		}
 	}
@@ -74,7 +74,7 @@ func TestAnOlderSetupGetsOnlyWhatItHas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the claim past the usable part: %v", err)
 	}
-	if o := lastOctet(lease.IP); o <= legacyDynamicEnd {
+	if o := lastOctet(lease.IP); o <= macAliasEnd {
 		t.Fatalf("got 127.0.0.%d, which was already handed out", o)
 	}
 }

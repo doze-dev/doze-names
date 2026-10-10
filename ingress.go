@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"os"
 	"strings"
 	"time"
 )
@@ -40,6 +41,15 @@ const (
 	ingressNetwork = "tcp4"
 	ingressBind    = "0.0.0.0:80"
 )
+
+// IngressBind is the address the front door listens on: the wildcard on port
+// 80, unless EnvIngress moves it.
+func IngressBind() string {
+	if a := strings.TrimSpace(os.Getenv(EnvIngress)); a != "" {
+		return a
+	}
+	return ingressBind
+}
 
 // ingressKey records which process holds the front door. It is not a valid
 // in-zone name — no host ends in it — so it can never collide with a real
@@ -175,7 +185,8 @@ func ServeIngress(ctx context.Context, r *Registry, logf func(string, ...any)) *
 		defer close(in.done)
 		var announced bool
 		for {
-			ln, err := net.Listen(ingressNetwork, ingressBind)
+			bind := IngressBind()
+			ln, err := net.Listen(ingressNetwork, bind)
 			switch {
 			case err == nil:
 				select {
@@ -183,8 +194,8 @@ func ServeIngress(ctx context.Context, r *Registry, logf func(string, ...any)) *
 				default:
 					close(in.bound)
 				}
-				logf("names: fronting %s on %s", Suffix, IngressAddr)
-				r.claimIngress(ingressBind)
+				logf("names: fronting %s on %s", Suffix, bind)
+				r.claimIngress(bind)
 				announced = false
 				srv := &http.Server{Handler: proxy(r)}
 				go func() { <-ctx.Done(); _ = srv.Close() }()
@@ -205,7 +216,7 @@ func ServeIngress(ctx context.Context, r *Registry, logf func(string, ...any)) *
 						// plainly what happened.
 						logf("names: something other than doze holds %s, so %s names cannot be "+
 							"port-less — they still work with their port. Stop it, or use the "+
-							"port-ful URL below", IngressAddr, Suffix)
+							"port-ful URL below", bind, Suffix)
 					}
 					announced = true
 				}
@@ -213,7 +224,7 @@ func ServeIngress(ctx context.Context, r *Registry, logf func(string, ...any)) *
 				if !announced {
 					// On Linux this is the sysctl not being applied. Say so
 					// rather than leaving a bare EACCES.
-					logf("names: cannot bind %s (%v); names will need their port", IngressAddr, err)
+					logf("names: cannot bind %s (%v); names will need their port", bind, err)
 					announced = true
 				}
 			}
@@ -331,7 +342,12 @@ func (r *Registry) URLFor(host string) string {
 	// if that something is nginx this would hand back a port-less URL that
 	// reaches nginx. Only a live doze process holding the port means the bare
 	// name works.
-	if _, ok := r.IngressHolder(); ok {
+	if h, ok := r.IngressHolder(); ok {
+		// Port-less on 80. A front door moved elsewhere (EnvIngress) is still the
+		// way in, with its port.
+		if _, port, err := net.SplitHostPort(h.Target); err == nil && port != "80" {
+			return "http://" + host + ":" + port
+		}
 		return "http://" + host
 	}
 	if _, port, err := net.SplitHostPort(e.Target); err == nil {

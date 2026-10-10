@@ -200,11 +200,26 @@ func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 // on a dummy interface that setup creates. Both platforms use a high port: 53
 // is held on the wildcard by whatever already serves DNS.
 func ResolverAddr() string {
+	if a := strings.TrimSpace(os.Getenv(EnvResolver)); a != "" {
+		return a
+	}
 	if runtime.GOOS == "linux" {
 		return resolverIP + ":" + resolverPort
 	}
 	return "127.0.0.1:" + resolverPort
 }
+
+// EnvResolver and EnvIngress move the zone's two shared sockets, for a zone
+// that must not touch the machine's real one: a test, or two zones side by
+// side. Together with EnvHome they make a zone private — its own registry, its
+// own DNS server, its own front door. Every program in that zone has to be
+// given the same three values, exactly as every program in the real zone
+// agrees on the defaults. The operating system's resolver knows nothing of a
+// private zone; its names resolve only for a client that asks its DNS server.
+const (
+	EnvResolver = "DOZE_ZONE_RESOLVER" // host:port for the DNS server, e.g. 127.0.0.1:15323
+	EnvIngress  = "DOZE_ZONE_INGRESS"  // host:port for the HTTP front door, e.g. 127.0.0.1:18080
+)
 
 // EnvHome overrides the shared doze home, matching doze core's variable.
 const EnvHome = "DOZE_HOME"

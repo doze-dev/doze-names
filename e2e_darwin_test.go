@@ -391,3 +391,29 @@ func TestNetworkDaemonRestart(t *testing.T) {
 		t.Fatalf("a listener opened after the restart answered %q, %v", got, err)
 	}
 }
+
+// A service stops and starts again at once, as a restart does: same address,
+// same public port, a private port that is different. The very next connection
+// has to reach the new listener. A daemon that translated from a table it had
+// read a moment before sent it to the old port, which nothing listened on.
+func TestNetworkAServiceThatRestarts(t *testing.T) {
+	r := e2e(t)
+	lease, err := r.Claim(Qualified("db", "again"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	for i := 0; i < 50; i++ {
+		ln, err := lease.Listen(5432)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := fmt.Sprintf("run %d", i)
+		go serveName(ln, name)
+		got, err := askAddr(ln.Addr().String())
+		ln.Close()
+		if err != nil || got != name {
+			t.Fatalf("restart %d: the first connection answered %q, %v; want %q", i, got, err, name)
+		}
+	}
+}

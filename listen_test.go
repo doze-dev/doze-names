@@ -168,3 +168,42 @@ func TestRegistryListenFindsTheNameByItsAddress(t *testing.T) {
 	}
 	plain.Close()
 }
+
+// A service that restarts comes back on a different private port at the same
+// address. The first connection after that must go to the new one, not to the
+// port the last run had — which nothing listens on any more.
+func TestTheTableFollowsAServiceThatRestarted(t *testing.T) {
+	machine(t, translatedLoopback, all)
+	r := Open(t.TempDir(), "doze")
+	lease, err := r.Claim(Qualified("db", "shop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v [4]byte
+	copy(v[:], lease.IP.To4())
+	if err := lease.Forward(5432, 51885); err != nil {
+		t.Fatal(err)
+	}
+	c := newTableCache(r.Path(), zone)
+	if p, _ := c.current().private(v, 5432); p != 51885 {
+		t.Fatalf("before the restart 5432 → %d", p)
+	}
+
+	if err := lease.Forward(5432, 52094); err != nil {
+		t.Fatal(err)
+	}
+	c.refresh(false) // what a new connection does
+	if p, _ := c.current().private(v, 5432); p != 52094 {
+		t.Fatalf("after the restart 5432 → %d, want the new port 52094", p)
+	}
+	if _, ok := c.current().public(v, 51885); ok {
+		t.Fatal("the old private port still maps back to 5432")
+	}
+
+	// Nothing written: nothing rebuilt.
+	before := c.current()
+	c.refresh(false)
+	if c.current() != before {
+		t.Fatal("the table was rebuilt though the registry had not changed")
+	}
+}

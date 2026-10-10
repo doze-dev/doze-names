@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -84,26 +83,12 @@ func runNetd(args []string) error {
 		fmt.Fprintf(os.Stderr, "netd: cannot record that it serves %s: %v\n", registry, err)
 	}
 
-	var table atomic.Pointer[portTable]
-	table.Store(readPortTable(registry, zone))
-	// The table is re-read when the file changes, and on a slow tick for a
-	// service that died without writing anything.
-	var stamp atomic.Int64
-	reload := func() {
-		table.Store(readPortTable(registry, zone))
-	}
-	changed := func() bool {
-		st, err := os.Stat(registry)
-		if err != nil {
-			return false
-		}
-		s := st.ModTime().UnixNano() ^ st.Size()
-		return stamp.Swap(s) != s
-	}
+	cache := newTableCache(registry, zone)
+	// A rewrite of the file is noticed when a connection opens (below); this is
+	// for what the file cannot say, a service that died without writing.
 	go func() {
 		for range time.Tick(tableRefresh) {
-			changed()
-			reload()
+			cache.refresh(true)
 		}
 	}()
 
@@ -122,14 +107,10 @@ func runNetd(args []string) error {
 			continue
 		}
 		p := buf[utunHeader:n]
-		t := table.Load()
-		if firstPacket(p) && !known(t, p) && changed() {
-			// A connection to a port this table has not got: the service may
-			// have registered it a moment ago.
-			reload()
-			t = table.Load()
+		if firstPacket(p) {
+			cache.refresh(false)
 		}
-		if !translate(p, gwAddr, t) {
+		if !translate(p, gwAddr, cache.current()) {
 			continue
 		}
 		if _, err := unix.Write(fd, buf[:utunHeader+packetLen(p)]); err != nil && !errors.Is(err, unix.ENOBUFS) {
@@ -142,15 +123,6 @@ func runNetd(args []string) error {
 func firstPacket(p []byte) bool {
 	ihl := int(p[0]&0x0f) * 4
 	return len(p) >= ihl+20 && p[9] == protoTCP && p[ihl+13]&(tcpSYN|tcpACK) == tcpSYN
-}
-
-// known reports whether the table has the port a first packet is for.
-func known(t *portTable, p []byte) bool {
-	ihl := int(p[0]&0x0f) * 4
-	var dst [4]byte
-	copy(dst[:], p[16:20])
-	_, ok := t.private(dst, uint16(p[ihl+2])<<8|uint16(p[ihl+3]))
-	return ok
 }
 
 // openTunnel creates a utun interface and returns its descriptor and name. The

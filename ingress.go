@@ -316,7 +316,7 @@ func hostOnly(host string) string {
 func routed(r *Registry) []string {
 	var out []string
 	for host, e := range r.Snapshot() {
-		if host == ingressKey || host == resolverKey {
+		if strings.HasPrefix(host, "_") {
 			continue // bookkeeping, not a route
 		}
 		if e.Target != "" {

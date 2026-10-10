@@ -332,3 +332,58 @@ func (r *Registry) update(fn func(map[string]Entry) error) error {
 	}
 	return os.Rename(tmp, r.path)
 }
+
+// stackPrefix marks the entry that records which project a stack name belongs
+// to. Like the other bookkeeping keys it is not an in-zone name.
+const stackPrefix = "_stack."
+
+// ErrStackTaken reports that a stack name is in use by another project.
+type ErrStackTaken struct {
+	Stack string
+	Dir   string // the project that has it
+	PID   int
+}
+
+func (e *ErrStackTaken) Error() string {
+	return fmt.Sprintf("stack name %q is already in use by %s (pid %d)", e.Stack, e.Dir, e.PID)
+}
+
+// ClaimStack records that the stack called name belongs to the project in dir,
+// for as long as this process lives. Every name in a stack is
+// <service>.<name>.doze, so two projects with one stack name would answer for
+// each other's services; the second is refused and told who has it. The same
+// project claiming again — a daemon restarting — takes over its own entry.
+//
+// It is in the registry, under the registry's lock, for the reason the front
+// door's holder is: one file, one lock and one liveness rule, and a crashed
+// process frees its name with no cleanup.
+func (r *Registry) ClaimStack(name, dir string) (release func(), err error) {
+	key := stackPrefix + label(name)
+	err = r.update(func(m map[string]Entry) error {
+		if cur, ok := m[key]; ok && cur.PID != r.pid && cur.Target != dir {
+			return &ErrStackTaken{Stack: name, Dir: cur.Target, PID: cur.PID}
+		}
+		m[key] = Entry{PID: r.pid, Owner: r.owner, Target: dir}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		_ = r.update(func(m map[string]Entry) error {
+			if cur, ok := m[key]; ok && cur.PID == r.pid {
+				delete(m, key)
+			}
+			return nil
+		})
+	}, nil
+}
+
+// ReservedStack reports whether a stack may not be called name, because its
+// services would collide with a machine-wide name: a stack called "aws" would
+// put db.aws.doze under aws.doze, which belongs to whichever local AWS holds
+// the apex.
+func ReservedStack(name string) bool {
+	_, ok := apexIP[label(name)]
+	return ok
+}

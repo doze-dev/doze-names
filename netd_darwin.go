@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -76,6 +77,12 @@ func runNetd(args []string) error {
 		return fmt.Errorf("netd: drop uid: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "netd: %s on %s, translating from %s as uid %d\n", zone.cidr(), ifname, registry, uid)
+	// Say which home this daemon serves, where the programs of that home look:
+	// a pid in the home, so a daemon started by hand is found the same way a
+	// launchd one is, and a zone moved with DOZE_HOME is known to have none.
+	if err := writeServing(registry); err != nil {
+		fmt.Fprintf(os.Stderr, "netd: cannot record that it serves %s: %v\n", registry, err)
+	}
 
 	var table atomic.Pointer[portTable]
 	table.Store(readPortTable(registry, zone))
@@ -193,4 +200,16 @@ func routeOwner(ip string) string {
 		return ""
 	}
 	return dest + " on " + iface
+}
+
+// servingFile is the file, beside the registry, that names the daemon serving
+// it.
+const servingFile = "netd.pid"
+
+func writeServing(registry string) error {
+	dir := filepath.Dir(registry)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, servingFile), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644)
 }

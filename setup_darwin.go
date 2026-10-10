@@ -188,9 +188,13 @@ func uninstall(o Options) error {
 	return nil
 }
 
-// servesHome reports whether the installed daemon translates from this zone's
-// registry. The job says which registry it was given, and anyone can read it.
+// servesHome reports whether a live daemon translates from this zone's
+// registry: the one that wrote its pid beside it.
 func servesHome() bool {
-	raw, err := os.ReadFile(launchdPath)
-	return err == nil && strings.Contains(string(raw), "<string>"+xmlEscape(filepath.Join(Home(), FileName))+"</string>")
+	raw, err := os.ReadFile(filepath.Join(Home(), servingFile))
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	return err == nil && alive(pid)
 }

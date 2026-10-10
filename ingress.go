@@ -302,7 +302,13 @@ func fromThisMachine(remote string) bool {
 		host = remote
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil {
+		return false
+	}
+	// A client that came by a translated address arrives from that address:
+	// the block is routed to this machine's own interface and nowhere else.
+	_, translated := zone.offset(ip)
+	return ip.IsLoopback() || (zone.virtual && translated)
 }
 
 func hostOnly(host string) string {

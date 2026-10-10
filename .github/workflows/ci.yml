@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+
+  # The macOS network daemon, on a machine that is thrown away afterwards: it
+  # needs root to install, and it is the part no developer's Mac should be the
+  # first to try.
+  macos-network:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: sw_vers
+      - name: set up the zone
+        run: |
+          go build -o "$RUNNER_TEMP/doze-names" ./cmd/doze-names
+          "$RUNNER_TEMP/doze-names" setup
+          "$RUNNER_TEMP/doze-names" check
+      - name: the network, for real
+        run: DOZE_NAMES_E2E=1 go test -v -count=1 -run '^TestNetwork' .
+      - name: what the machine looked like
+        if: always()
+        run: |
+          sudo cat /var/log/doze-netd.log || true
+          ifconfig | grep -A3 '^utun' || true
+          netstat -rn -f inet | grep -E '198\.19|Destination' || true
+          cat /etc/resolver/doze || true

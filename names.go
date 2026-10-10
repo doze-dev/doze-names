@@ -20,13 +20,13 @@
 //
 // # Addresses
 //
-// Every name resolves to its own loopback address rather than to a shared
-// 127.0.0.1. That is what lets each service hold its canonical port — every
+// Every name resolves to an address of its own rather than to a shared
+// 127.0.0.1 (see pool.go for where the addresses come from). That is what lets each service hold its canonical port — every
 // Kafka on 9092, every local AWS on 80 — instead of a hand-picked high one, and
 // it means http://aws.doze is the same URL whether a standalone process or a
 // stack instance is behind it.
 //
-// Apex addresses are FIXED (see apexIP) rather than allocated, because on Linux
+// Apex addresses are FIXED (see apexOffset) rather than allocated, because on Linux
 // they are written into /etc/hosts once at setup time, before anything is
 // running. A static block never needs rewriting as services come and go, and
 // when nothing is listening the name still resolves and the connection is
@@ -36,7 +36,6 @@ package names
 
 import (
 	"fmt"
-	"hash/fnv"
 	"net"
 	"os"
 	"path/filepath"
@@ -47,54 +46,6 @@ import (
 
 // Suffix is the private TLD every doze name lives under.
 const Suffix = "doze"
-
-// The loopback range splits into a reserved head and a dynamic tail. Apex
-// names take fixed addresses from the head so they can be written to
-// /etc/hosts before any process exists; qualified names are placed in the tail.
-//
-// The tail runs to .254, and how much of it a machine can use depends on the
-// machine. On Linux all of 127.0.0.0/8 is local, so every address is there for
-// free. On macOS an address exists only once it has been aliased onto lo0, and
-// setup aliases only up to macAliasEnd, on purpose: mDNSResponder registers
-// every interface address, and a few hundred aliases have been seen to peg it.
-// So a Mac has 56 addresses for services and Linux has 245. addressFor hands
-// out what is actually there (see canBind), which is what makes one range
-// serve both.
-const (
-	apexBase    = 2
-	apexEnd     = 9
-	dynamicBase = 10
-	dynamicEnd  = 254
-)
-
-// macAliasEnd is the last address macOS setup aliases onto lo0. Raising it is
-// not free: see the note on the range above, and measure mDNSResponder first.
-const macAliasEnd = 65
-
-// poolEnd is the last address a name is hashed to on this platform. Hashing
-// across the whole range on a Mac would land most names on an address that is
-// not aliased, and every one of them would then slide to the first free one —
-// which is "lowest free", not "the same address every run". A variable so a
-// test can stand in either platform.
-var poolEnd = func() int {
-	if runtime.GOOS == "darwin" {
-		return macAliasEnd
-	}
-	return dynamicEnd
-}()
-
-// canBind reports whether this machine can listen on a loopback address right
-// now. On Linux every 127.x.y.z address is local. On macOS only the ones setup
-// aliased onto lo0 are, so an address from the pool is not usable just because
-// it is free. A variable so a test can stand in a machine of its choosing.
-var canBind = func(ip string) bool {
-	l, err := net.Listen("tcp", net.JoinHostPort(ip, "0"))
-	if err != nil {
-		return false
-	}
-	_ = l.Close()
-	return true
-}
 
 // resolverIP is where the resolver listens on Linux — deliberately NOT a
 // loopback address.
@@ -128,14 +79,6 @@ const (
 // Using a high port also takes the privileged-port sysctl off the DNS path
 // entirely; it is still needed for the :80 front door.
 const resolverPort = "5323"
-
-// apexIP is the fixed address of each well-known service. Adding an entry here
-// is a compatibility commitment: it goes into people's /etc/hosts.
-var apexIP = map[string]string{
-	"aws":   "127.0.0.2",
-	"kafka": "127.0.0.3",
-	// 127.0.0.4-9 held for postgres, valkey, … as they arrive.
-}
 
 // Tier distinguishes a machine-wide name from a stack's own.
 type Tier string
@@ -191,51 +134,6 @@ func label(s string) string {
 		}
 	}
 	return strings.Trim(b.String(), "-")
-}
-
-// addressFor picks the loopback address a name should resolve to. Apex names
-// are looked up in the fixed table; qualified names are hashed into the dynamic
-// range so the same name lands on the same address run after run without
-// anything having to be persisted. taken lets the caller exclude addresses
-// live peers already hold.
-//
-// It prefers an address this machine can listen on. If none of the free ones
-// can be — macOS before setup — it falls back to the hash alone, so the name
-// still has an address and the caller learns the rest when it tries to bind,
-// which is how every caller already handles a machine that is not set up.
-func addressFor(n Name, taken map[string]bool) (net.IP, error) {
-	if n.Tier == TierApex {
-		ip, ok := apexIP[n.service()]
-		if !ok {
-			return nil, fmt.Errorf("no reserved address for apex name %q "+
-				"(add it to apexIP — the value is a compatibility commitment)", n.Host)
-		}
-		return net.ParseIP(ip), nil
-	}
-
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(n.Host))
-	span := poolEnd - dynamicBase + 1
-	start := int(h.Sum32()%uint32(span)) + dynamicBase
-	// Probe forward so a collision with a live peer shifts rather than fails.
-	firstFree := ""
-	for i := 0; i < span; i++ {
-		octet := dynamicBase + (start-dynamicBase+i)%span
-		ip := fmt.Sprintf("127.0.0.%d", octet)
-		if taken[ip] {
-			continue
-		}
-		if firstFree == "" {
-			firstFree = ip
-		}
-		if canBind(ip) {
-			return net.ParseIP(ip), nil
-		}
-	}
-	if firstFree != "" {
-		return net.ParseIP(firstFree), nil
-	}
-	return nil, fmt.Errorf("every address in 127.0.0.%d-%d is in use by a running doze service", dynamicBase, poolEnd)
 }
 
 // ResolverAddr is where the resolver listens, which differs by platform
@@ -312,9 +210,3 @@ func Reachable(host string, port int) bool {
 }
 
 const reachableWait = 400 * time.Millisecond
-
-// PoolUsable reports whether this machine can give a service an address of its
-// own: whether the first address of the pool can be listened on. It is true on
-// Linux, and on macOS once setup has aliased the range. When it is false,
-// everything listens on 127.0.0.1 and two services cannot share a port.
-func PoolUsable() bool { return canBind(fmt.Sprintf("127.0.0.%d", dynamicBase)) }

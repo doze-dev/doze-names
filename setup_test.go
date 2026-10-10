@@ -90,7 +90,7 @@ func TestApexBlockIsByteStable(t *testing.T) {
 		}
 	}
 	for _, svc := range apexServices() {
-		if !strings.Contains(first, apexIP[svc]) || !strings.Contains(first, Apex(svc).Host) {
+		if !strings.Contains(first, zone.at(apexOffset[svc]).String()) || !strings.Contains(first, Apex(svc).Host) {
 			t.Errorf("block omits %s", svc)
 		}
 	}

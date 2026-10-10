@@ -106,7 +106,8 @@ func apexHostsBlock() string {
 	// Sorted by address so the block is byte-stable across runs; an unstable
 	// block would show up as a spurious diff every time Check compares.
 	for _, svc := range apexServices() {
-		fmt.Fprintf(&b, "%s\t%s\n", apexIP[svc], Apex(svc).Host)
+		ip, _ := apexAddr(svc)
+		fmt.Fprintf(&b, "%s\t%s\n", ip, Apex(svc).Host)
 	}
 	b.WriteString(hostsEnd + "\n")
 	return b.String()
@@ -114,14 +115,14 @@ func apexHostsBlock() string {
 
 // apexServices returns the reserved service names in a stable order.
 func apexServices() []string {
-	out := make([]string, 0, len(apexIP))
-	for svc := range apexIP {
+	out := make([]string, 0, len(apexOffset))
+	for svc := range apexOffset {
 		out = append(out, svc)
 	}
 	// Insertion sort by address: the table is tiny and this avoids importing
 	// sort for one call.
 	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && apexIP[out[j]] < apexIP[out[j-1]]; j-- {
+		for j := i; j > 0 && apexOffset[out[j]] < apexOffset[out[j-1]]; j-- {
 			out[j], out[j-1] = out[j-1], out[j]
 		}
 	}

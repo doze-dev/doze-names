@@ -4,54 +4,56 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
 	"testing"
 )
 
-// machine stands in a machine on which only some of the pool can be bound.
-func machine(t *testing.T, bindable func(octet int) bool) {
+// Every test runs on the loopback network unless it says otherwise, so the
+// suite means the same thing on a Mac as on Linux.
+func init() { zone = loopbackNet }
+
+// machine stands in a machine: its network, and which addresses can be used.
+func machine(t *testing.T, n network, usable func(ip string) bool) {
 	t.Helper()
-	old, oldEnd := canBind, poolEnd
-	poolEnd = dynamicEnd // the wide range, unless a test narrows it with mac()
-	canBind = func(ip string) bool {
-		octet, err := strconv.Atoi(ip[strings.LastIndex(ip, ".")+1:])
-		return err == nil && bindable(octet)
+	oldZone, oldBind := zone, canBind
+	zone, canBind = n, usable
+	t.Cleanup(func() { zone, canBind = oldZone, oldBind })
+}
+
+func all(string) bool  { return true }
+func none(string) bool { return false }
+
+func offsetOf(t *testing.T, ip net.IP) int {
+	t.Helper()
+	off, ok := zone.offset(ip)
+	if !ok {
+		t.Fatalf("%s is outside %s", ip, zone.cidr())
 	}
-	t.Cleanup(func() { canBind, poolEnd = old, oldEnd })
+	return off
 }
 
-// mac stands in a Mac after setup: .2 to .65 aliased, and names hashed there.
-func mac(t *testing.T) {
-	t.Helper()
-	machine(t, func(o int) bool { return o >= apexBase && o <= macAliasEnd })
-	poolEnd = macAliasEnd
-}
-
-func lastOctet(ip net.IP) int { return int(ip.To4()[3]) }
-
-func TestThePoolRunsTo254AndANameKeepsItsAddress(t *testing.T) {
-	machine(t, func(int) bool { return true }) // Linux: the whole range is local
+func TestThePoolIsWideAndANameKeepsItsAddress(t *testing.T) {
+	machine(t, loopbackNet, all)
 	r := Open(t.TempDir(), "doze")
-	seen := map[int]bool{}
-	high := false
-	for i := 0; i < 120; i++ {
+	seen := map[string]bool{}
+	beyond := false
+	for i := 0; i < 300; i++ {
 		lease, err := r.Claim(Qualified(fmt.Sprintf("svc%d", i), "shop"))
 		if err != nil {
 			t.Fatalf("claim %d: %v", i, err)
 		}
-		o := lastOctet(lease.IP)
-		if o < dynamicBase || o > dynamicEnd {
-			t.Fatalf("svc%d got 127.0.0.%d, outside %d-%d", i, o, dynamicBase, dynamicEnd)
+		off := offsetOf(t, lease.IP)
+		if last := off & 0xff; off < dynamicBase || last == 0 || last == 255 {
+			t.Fatalf("svc%d got %s, which is not an address a name may have", i, lease.IP)
 		}
-		if seen[o] {
-			t.Fatalf("127.0.0.%d was handed out twice", o)
+		if seen[lease.IP.String()] {
+			t.Fatalf("%s was handed out twice", lease.IP)
 		}
-		seen[o] = true
-		high = high || o > macAliasEnd
+		seen[lease.IP.String()] = true
+		beyond = beyond || off > 255
 	}
-	if !high {
-		t.Fatalf("120 services all fit below .%d: the wider pool is not being used", macAliasEnd)
+	if !beyond {
+		t.Fatal("300 services all fit in 127.0.0.x: the block is not being used")
 	}
 	// The same name asks again, from a fresh registry: the same address.
 	a, _ := Open(t.TempDir(), "doze").Claim(Qualified("db", "shop"))
@@ -61,52 +63,33 @@ func TestThePoolRunsTo254AndANameKeepsItsAddress(t *testing.T) {
 	}
 }
 
-// A Mac has only .2 to .65 aliased. Everything handed out there must be an
-// address it can actually listen on.
-func TestAMacGetsOnlyWhatItHasAliased(t *testing.T) {
-	mac(t)
-	r := Open(t.TempDir(), "doze")
-	n := macAliasEnd - dynamicBase + 1
-	for i := 0; i < n; i++ {
-		lease, err := r.Claim(Qualified(fmt.Sprintf("svc%d", i), "shop"))
-		if err != nil {
-			t.Fatalf("claim %d: %v", i, err)
-		}
-		if o := lastOctet(lease.IP); o > macAliasEnd {
-			t.Fatalf("svc%d got 127.0.0.%d, which this machine cannot bind", i, o)
-		}
+// A name sits at the same place in the block on a Mac as on Linux; only the
+// block differs.
+func TestANameHasTheSameOffsetOnBothSystems(t *testing.T) {
+	machine(t, loopbackNet, all)
+	a, _ := Open(t.TempDir(), "doze").Claim(Qualified("db", "shop"))
+	offA := offsetOf(t, a.IP)
+	machine(t, virtualNet, all)
+	b, _ := Open(t.TempDir(), "doze").Claim(Qualified("db", "shop"))
+	if offB := offsetOf(t, b.IP); offA != offB {
+		t.Fatalf("db.shop.doze is at offset %d on Linux and %d on a Mac", offA, offB)
 	}
-	// A Mac's share is used up, and the claim says so rather than naming an
-	// address the machine does not have.
-	if _, err := r.Claim(Qualified("one-too-many", "shop")); err == nil || !strings.Contains(err.Error(), "in use") {
-		t.Fatalf("the 57th service on a Mac = %v, want an error saying the pool is in use", err)
+	if b.IP[0] != 198 || b.IP[1] != 19 {
+		t.Fatalf("on a Mac db.shop.doze = %s, want an address in %s", b.IP, virtualNet.cidr())
 	}
 }
 
-// On a Mac names are hashed into the part of the range the machine has, so
-// each lands on an address of its own choosing rather than all of them sliding
-// to the lowest free one.
-func TestAMacSpreadsNamesAcrossItsRange(t *testing.T) {
-	mac(t)
-	distinct := map[int]bool{}
-	for _, n := range []string{"db", "cache", "api", "web", "events", "cloud", "worker", "auth"} {
-		l, _ := Open(t.TempDir(), "doze").Claim(Qualified(n, "shop"))
-		distinct[lastOctet(l.IP)] = true
-	}
-	if len(distinct) < 5 {
-		t.Fatalf("eight names hashed to only %d addresses: they are sliding to the lowest free one", len(distinct))
-	}
-}
-
-// A machine with no setup at all (macOS, fresh): names still get the address
-// their hash gives, as they always have.
+// A Mac with no setup: names still get the address their hash gives.
 func TestNoSetupStillNamesAnAddress(t *testing.T) {
-	machine(t, func(int) bool { return false })
+	machine(t, virtualNet, none)
 	a, err := Open(t.TempDir(), "doze").Claim(Qualified("db", "shop"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	machine(t, func(int) bool { return true })
+	if PoolUsable() {
+		t.Fatal("a machine whose daemon is down reports its pool usable")
+	}
+	machine(t, virtualNet, all)
 	b, _ := Open(t.TempDir(), "doze").Claim(Qualified("db", "shop"))
 	if !a.IP.Equal(b.IP) {
 		t.Fatalf("with no setup db.shop.doze got %s; with setup %s — the hash should decide both", a.IP, b.IP)
@@ -116,23 +99,23 @@ func TestNoSetupStillNamesAnAddress(t *testing.T) {
 // Releasing a name gives its address back at once.
 func TestAReleasedAddressIsReused(t *testing.T) {
 	// One usable address, so the second claim can only succeed by reusing it.
-	machine(t, func(o int) bool { return o == 42 })
+	machine(t, loopbackNet, func(ip string) bool { return ip == "127.0.0.42" })
 	r := Open(t.TempDir(), "doze")
 	first, err := r.Claim(Qualified("old", "shop"))
-	if err != nil || lastOctet(first.IP) != 42 {
+	if err != nil || first.IP.String() != "127.0.0.42" {
 		t.Fatalf("first claim = %v, %v; want 127.0.0.42", first, err)
 	}
 	if err := first.Release(); err != nil {
 		t.Fatal(err)
 	}
 	second, err := r.Claim(Qualified("new", "shop"))
-	if err != nil || lastOctet(second.IP) != 42 {
+	if err != nil || second.IP.String() != "127.0.0.42" {
 		t.Fatalf("after the release, the next claim got %v, %v; want the freed 127.0.0.42", second.IP, err)
 	}
 }
 
 func TestClaimAtRefusesAnAddressInUse(t *testing.T) {
-	machine(t, func(int) bool { return true })
+	machine(t, loopbackNet, all)
 	r := Open(t.TempDir(), "doze")
 	db, err := r.Claim(Qualified("db", "shop"))
 	if err != nil {
@@ -153,26 +136,32 @@ func TestClaimAtRefusesAnAddressInUse(t *testing.T) {
 }
 
 func TestAFullPoolSaysSo(t *testing.T) {
-	machine(t, func(int) bool { return true })
-	r := Open(t.TempDir(), "doze")
-	for i := 0; i < dynamicEnd-dynamicBase+1; i++ {
-		if _, err := r.Claim(Qualified(fmt.Sprintf("svc%d", i), "shop")); err != nil {
-			t.Fatalf("claim %d: %v", i, err)
-		}
+	machine(t, loopbackNet, all)
+	taken := map[string]bool{}
+	for slot := 0; slot < blockSlots; slot++ {
+		taken[zone.at(slotOffset(slot)).String()] = true
 	}
-	_, err := r.Claim(Qualified("one-too-many", "shop"))
-	if err == nil || !strings.Contains(err.Error(), "in use") {
-		t.Fatalf("the 246th service = %v, want an error saying the pool is in use", err)
+	free := zone.at(slotOffset(blockSlots - 7))
+	delete(taken, free.String())
+	if ip, err := addressFor(Qualified("last", "shop"), taken); err != nil || !ip.Equal(free) {
+		t.Fatalf("with one address left the claim got %v, %v; want %s", ip, err, free)
+	}
+	taken[free.String()] = true
+	if _, err := addressFor(Qualified("one-too-many", "shop"), taken); err == nil || !strings.Contains(err.Error(), "in use") {
+		t.Fatalf("a claim on a full pool = %v, want an error saying it is in use", err)
 	}
 }
 
 // On a machine with no setup every name resolves to 127.0.0.1. That address is
-// shared on purpose and must never be refused.
+// shared on purpose and must never be refused, on either network.
 func TestClaimAtSharesTheLoopbackAddress(t *testing.T) {
-	r := Open(t.TempDir(), "doze")
-	for _, svc := range []string{"db", "cache", "api"} {
-		if _, err := r.ClaimAt(Qualified(svc, "shop"), net.ParseIP("127.0.0.1")); err != nil {
-			t.Fatalf("%s at 127.0.0.1: %v", svc, err)
+	for _, n := range []network{loopbackNet, virtualNet} {
+		machine(t, n, all)
+		r := Open(t.TempDir(), "doze")
+		for _, svc := range []string{"db", "cache", "api"} {
+			if _, err := r.ClaimAt(Qualified(svc, "shop"), net.ParseIP("127.0.0.1")); err != nil {
+				t.Fatalf("%s at 127.0.0.1: %v", svc, err)
+			}
 		}
 	}
 }

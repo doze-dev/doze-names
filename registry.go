@@ -29,7 +29,7 @@ const FileName = "names.json"
 // Raise it when an older build could no longer read the file correctly — a
 // field changing meaning, an entry it must not prune. Adding an optional field
 // an older build can ignore does not need it.
-const FormatVersion = 1
+const FormatVersion = 2
 
 // formatKey holds the version, as an entry of its own. It lives beside
 // ingressKey and resolverKey rather than in a wrapper around the names, so
@@ -59,6 +59,10 @@ type Entry struct {
 	// Empty means the name resolves but is not fronted, which is right for a
 	// service that is not HTTP.
 	Target string `json:"target,omitempty"`
+	// Ports is set where a name's address is translated and not bound (macOS):
+	// each public port, and the private port on the gateway it is served on.
+	// See Lease.Listen.
+	Ports map[string]int `json:"ports,omitempty"`
 	// Format is set only on the entry that records the file's format version.
 	Format int `json:"format,omitempty"`
 }
@@ -168,6 +172,9 @@ func (r *Registry) claim(n Name, want net.IP) (*Lease, error) {
 		e := Entry{IP: ip.String(), PID: r.pid, Owner: r.owner, Tier: n.Tier}
 		if cur, ok := m[n.Host]; ok && cur.PID == r.pid {
 			e.Target = cur.Target
+			if cur.IP == e.IP {
+				e.Ports = cur.Ports
+			}
 		}
 		m[n.Host] = e
 		lease = &Lease{Name: n, IP: ip, reg: r}
@@ -387,13 +394,6 @@ func (r *Registry) ClaimStack(name, dir string) (release func(), err error) {
 // put db.aws.doze under aws.doze, which belongs to whichever local AWS holds
 // the apex.
 func ReservedStack(name string) bool {
-	_, ok := apexIP[label(name)]
+	_, ok := apexOffset[label(name)]
 	return ok
-}
-
-// inPool reports whether ip is one of the addresses this package hands out:
-// 127.0.0.2 to 127.0.0.254.
-func inPool(ip net.IP) bool {
-	v4 := ip.To4()
-	return v4 != nil && v4[0] == 127 && v4[1] == 0 && v4[2] == 0 && int(v4[3]) >= apexBase && int(v4[3]) <= dynamicEnd
 }

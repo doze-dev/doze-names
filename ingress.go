@@ -294,21 +294,27 @@ func proxy(r *Registry) http.Handler {
 	})
 }
 
-// fromThisMachine reports whether a connection's peer address is loopback. A
+// OnThisMachine reports whether an address is this machine talking to itself:
+// loopback, or on a Mac one of the zone's translated addresses, which are
+// routed to this machine's own interface and nowhere else. It is the test for
+// "does this name resolve to something local", where IsLoopback alone would
+// say no to every service on a Mac.
+func OnThisMachine(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	_, translated := zone.offset(ip)
+	return ip.IsLoopback() || (zone.virtual && translated)
+}
+
+// fromThisMachine reports whether a connection's peer is this machine. A
 // RemoteAddr that cannot be parsed is not trusted.
 func fromThisMachine(remote string) bool {
 	host, _, err := net.SplitHostPort(remote)
 	if err != nil {
 		host = remote
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
-	}
-	// A client that came by a translated address arrives from that address:
-	// the block is routed to this machine's own interface and nowhere else.
-	_, translated := zone.offset(ip)
-	return ip.IsLoopback() || (zone.virtual && translated)
+	return OnThisMachine(net.ParseIP(host))
 }
 
 func hostOnly(host string) string {

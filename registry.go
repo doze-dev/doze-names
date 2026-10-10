@@ -129,7 +129,7 @@ type Lease struct {
 
 // Claim registers a name to this process and returns the address it resolves
 // to. An apex name held by another live process returns ErrHeld and no lease.
-func (r *Registry) Claim(n Name) (*Lease, error) { return r.claim(n, nil) }
+func (r *Registry) Claim(n Name) (*Lease, error) { return r.claim(n, nil, false) }
 
 // ClaimAt registers a name at an address the caller picked. If the address is
 // one of the pool's, it is refused when a different live name already resolves
@@ -137,9 +137,16 @@ func (r *Registry) Claim(n Name) (*Lease, error) { return r.claim(n, nil) }
 // names on one would send each other's clients to whichever service bound the
 // port first. An address outside the pool — 127.0.0.1, where everything
 // listens on a machine with no setup — is shared by design and never refused.
-func (r *Registry) ClaimAt(n Name, ip net.IP) (*Lease, error) { return r.claim(n, ip) }
+func (r *Registry) ClaimAt(n Name, ip net.IP) (*Lease, error) { return r.claim(n, ip, false) }
 
-func (r *Registry) claim(n Name, want net.IP) (*Lease, error) {
+// Twin registers a second name at this name's address, for a host that the
+// same listeners answer: sync-aws.shop.doze beside aws.shop.doze. It is the
+// one way two names share an address from the pool, and it has to be asked
+// for: two of a program's services landing on one address by accident is
+// still refused.
+func (l *Lease) Twin(n Name) (*Lease, error) { return l.reg.claim(n, l.IP, true) }
+
+func (r *Registry) claim(n Name, want net.IP, shared bool) (*Lease, error) {
 	var lease *Lease
 	err := r.update(func(m map[string]Entry) error {
 		if cur, ok := m[n.Host]; ok && cur.PID != r.pid && alive(cur.PID) {
@@ -161,7 +168,7 @@ func (r *Registry) claim(n Name, want net.IP) (*Lease, error) {
 			}
 		} else if inPool(ip) && taken[ip.String()] {
 			for host, e := range m {
-				if host != n.Host && e.IP == ip.String() {
+				if host != n.Host && e.IP == ip.String() && !(shared && e.PID == r.pid) {
 					return &ErrAddrTaken{IP: ip.String(), Host: host, PID: e.PID, Owner: e.Owner}
 				}
 			}

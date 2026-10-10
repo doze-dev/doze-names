@@ -166,3 +166,24 @@ func TestClaimAtSharesTheLoopbackAddress(t *testing.T) {
 		}
 	}
 }
+
+// One program, two names, one address: the twin is served by the same
+// listeners, so it is not a collision. Another program asking is.
+func TestAProgramMayShareAnAddressBetweenItsOwnNames(t *testing.T) {
+	machine(t, loopbackNet, all)
+	home := t.TempDir()
+	r := Open(home, "doze-aws")
+	aws, err := r.Claim(Qualified("aws", "shop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := aws.Twin(Name{Host: "sync-" + aws.Name.Host, Tier: TierQualified}); err != nil {
+		t.Fatalf("the program's own twin name at its address: %v", err)
+	}
+	other := Open(home, "doze")
+	other.pid = aws.reg.pid + 1 // another program
+	var taken *ErrAddrTaken
+	if _, err := other.ClaimAt(Qualified("cache", "shop"), aws.IP); !errors.As(err, &taken) {
+		t.Fatalf("another program claiming that address = %v, want ErrAddrTaken", err)
+	}
+}

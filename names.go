@@ -312,3 +312,9 @@ func Reachable(host string, port int) bool {
 }
 
 const reachableWait = 400 * time.Millisecond
+
+// PoolUsable reports whether this machine can give a service an address of its
+// own: whether the first address of the pool can be listened on. It is true on
+// Linux, and on macOS once setup has aliased the range. When it is false,
+// everything listens on 127.0.0.1 and two services cannot share a port.
+func PoolUsable() bool { return canBind(fmt.Sprintf("127.0.0.%d", dynamicBase)) }

@@ -12,12 +12,20 @@ import (
 // machine stands in a machine on which only some of the pool can be bound.
 func machine(t *testing.T, bindable func(octet int) bool) {
 	t.Helper()
-	old := canBind
+	old, oldEnd := canBind, poolEnd
+	poolEnd = dynamicEnd // the wide range, unless a test narrows it with mac()
 	canBind = func(ip string) bool {
 		octet, err := strconv.Atoi(ip[strings.LastIndex(ip, ".")+1:])
 		return err == nil && bindable(octet)
 	}
-	t.Cleanup(func() { canBind = old })
+	t.Cleanup(func() { canBind, poolEnd = old, oldEnd })
+}
+
+// mac stands in a Mac after setup: .2 to .65 aliased, and names hashed there.
+func mac(t *testing.T) {
+	t.Helper()
+	machine(t, func(o int) bool { return o >= apexBase && o <= macAliasEnd })
+	poolEnd = macAliasEnd
 }
 
 func lastOctet(ip net.IP) int { return int(ip.To4()[3]) }
@@ -56,7 +64,7 @@ func TestThePoolRunsTo254AndANameKeepsItsAddress(t *testing.T) {
 // A Mac has only .2 to .65 aliased. Everything handed out there must be an
 // address it can actually listen on.
 func TestAMacGetsOnlyWhatItHasAliased(t *testing.T) {
-	machine(t, func(o int) bool { return o >= apexBase && o <= macAliasEnd })
+	mac(t)
 	r := Open(t.TempDir(), "doze")
 	n := macAliasEnd - dynamicBase + 1
 	for i := 0; i < n; i++ {
@@ -68,14 +76,25 @@ func TestAMacGetsOnlyWhatItHasAliased(t *testing.T) {
 			t.Fatalf("svc%d got 127.0.0.%d, which this machine cannot bind", i, o)
 		}
 	}
-	// The usable ones are gone. The next name still gets an address — the
-	// caller finds out it cannot bind it, as on a machine with no setup at all.
-	lease, err := r.Claim(Qualified("one-too-many", "shop"))
-	if err != nil {
-		t.Fatalf("the claim past the usable part: %v", err)
+	// A Mac's share is used up, and the claim says so rather than naming an
+	// address the machine does not have.
+	if _, err := r.Claim(Qualified("one-too-many", "shop")); err == nil || !strings.Contains(err.Error(), "in use") {
+		t.Fatalf("the 57th service on a Mac = %v, want an error saying the pool is in use", err)
 	}
-	if o := lastOctet(lease.IP); o <= macAliasEnd {
-		t.Fatalf("got 127.0.0.%d, which was already handed out", o)
+}
+
+// On a Mac names are hashed into the part of the range the machine has, so
+// each lands on an address of its own choosing rather than all of them sliding
+// to the lowest free one.
+func TestAMacSpreadsNamesAcrossItsRange(t *testing.T) {
+	mac(t)
+	distinct := map[int]bool{}
+	for _, n := range []string{"db", "cache", "api", "web", "events", "cloud", "worker", "auth"} {
+		l, _ := Open(t.TempDir(), "doze").Claim(Qualified(n, "shop"))
+		distinct[lastOctet(l.IP)] = true
+	}
+	if len(distinct) < 5 {
+		t.Fatalf("eight names hashed to only %d addresses: they are sliding to the lowest free one", len(distinct))
 	}
 }
 

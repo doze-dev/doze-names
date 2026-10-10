@@ -71,6 +71,18 @@ const (
 // not free: see the note on the range above, and measure mDNSResponder first.
 const macAliasEnd = 65
 
+// poolEnd is the last address a name is hashed to on this platform. Hashing
+// across the whole range on a Mac would land most names on an address that is
+// not aliased, and every one of them would then slide to the first free one —
+// which is "lowest free", not "the same address every run". A variable so a
+// test can stand in either platform.
+var poolEnd = func() int {
+	if runtime.GOOS == "darwin" {
+		return macAliasEnd
+	}
+	return dynamicEnd
+}()
+
 // canBind reports whether this machine can listen on a loopback address right
 // now. On Linux every 127.x.y.z address is local. On macOS only the ones setup
 // aliased onto lo0 are, so an address from the pool is not usable just because
@@ -203,7 +215,7 @@ func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(n.Host))
-	span := dynamicEnd - dynamicBase + 1
+	span := poolEnd - dynamicBase + 1
 	start := int(h.Sum32()%uint32(span)) + dynamicBase
 	// Probe forward so a collision with a live peer shifts rather than fails.
 	firstFree := ""
@@ -223,7 +235,7 @@ func addressFor(n Name, taken map[string]bool) (net.IP, error) {
 	if firstFree != "" {
 		return net.ParseIP(firstFree), nil
 	}
-	return nil, fmt.Errorf("every address in 127.0.0.%d-%d is in use by a running doze service", dynamicBase, dynamicEnd)
+	return nil, fmt.Errorf("every address in 127.0.0.%d-%d is in use by a running doze service", dynamicBase, poolEnd)
 }
 
 // ResolverAddr is where the resolver listens, which differs by platform

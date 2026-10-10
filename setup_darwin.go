@@ -187,3 +187,10 @@ func uninstall(o Options) error {
 	}
 	return nil
 }
+
+// servesHome reports whether the installed daemon translates from this zone's
+// registry. The job says which registry it was given, and anyone can read it.
+func servesHome() bool {
+	raw, err := os.ReadFile(launchdPath)
+	return err == nil && strings.Contains(string(raw), "<string>"+xmlEscape(filepath.Join(Home(), FileName))+"</string>")
+}

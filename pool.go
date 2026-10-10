@@ -126,8 +126,13 @@ var canBind = func(ip string) bool {
 
 // gatewayUp reports whether the daemon's interface exists. The interface lives
 // exactly as long as the daemon holds it open, so this is also whether the
-// daemon is running.
+// daemon is running. A daemon translating from another home's registry is
+// not this zone's: a zone moved with DOZE_HOME has no daemon, and its
+// services listen on 127.0.0.1.
 func gatewayUp() bool {
+	if !servesHome() {
+		return false
+	}
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return false

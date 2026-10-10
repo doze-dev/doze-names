@@ -141,3 +141,30 @@ func TestARoutedNameIsServedByTheFrontDoor(t *testing.T) {
 		t.Fatal("a name with no route is forwarded to the front door")
 	}
 }
+
+// A caller with an address and no lease gets the same listener.
+func TestRegistryListenFindsTheNameByItsAddress(t *testing.T) {
+	machine(t, translatedLoopback, all)
+	r := Open(t.TempDir(), "doze")
+	lease, err := r.Claim(Qualified("db", "shop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := r.Listen(net.JoinHostPort(lease.IP.String(), "5432"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if e := r.Snapshot()["db.shop.doze"]; e.Ports["5432"] == 0 {
+		t.Fatalf("listening by address registered nothing: %+v", e)
+	}
+	if _, err := r.Listen(net.JoinHostPort(zone.at(99<<8|9).String(), "5432")); err == nil {
+		t.Fatal("listened on an address no name of this program has")
+	}
+	// An address outside the block is listened on as it is.
+	plain, err := r.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain.Close()
+}

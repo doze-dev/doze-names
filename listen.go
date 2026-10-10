@@ -187,3 +187,29 @@ func readPortTable(path string, n network) *portTable {
 	}
 	return t
 }
+
+// Listen opens a TCP listener on addr, "ip:port", for whichever of this
+// process's names has that address: Lease.Listen for a caller that carries
+// addresses about and not leases. An address that is no name's — 127.0.0.1 on
+// a machine with no setup — is simply listened on.
+func (r *Registry) Listen(addr string) (net.Listener, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ip := net.ParseIP(host)
+	if _, ok := zone.offset(ip); !zone.virtual || !ok {
+		return net.Listen("tcp", addr)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("listen %s: %q is not a port", addr, portStr)
+	}
+	for name, e := range r.Snapshot() {
+		if e.PID == r.pid && e.IP == ip.String() && InZone(name) {
+			l := &Lease{Name: Name{Host: name, Tier: e.Tier}, IP: ip.To4(), reg: r}
+			return l.Listen(port)
+		}
+	}
+	return nil, fmt.Errorf("listen %s: no name of this program has that address", addr)
+}

@@ -71,8 +71,7 @@ func (l *Lease) translated() bool {
 	if !zone.virtual {
 		return false
 	}
-	_, ok := zone.offset(l.IP)
-	return ok
+	return inPool(l.IP)
 }
 
 func (l *Lease) setPort(public, private int) error {
@@ -198,7 +197,7 @@ func (r *Registry) Listen(addr string) (net.Listener, error) {
 		return nil, err
 	}
 	ip := net.ParseIP(host)
-	if _, ok := zone.offset(ip); !zone.virtual || !ok {
+	if !zone.virtual || !inPool(ip) {
 		return net.Listen("tcp", addr)
 	}
 	port, err := strconv.Atoi(portStr)

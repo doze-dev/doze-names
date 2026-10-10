@@ -20,6 +20,35 @@ import (
 // FileName is the registry's name inside the doze home.
 const FileName = "names.json"
 
+// FormatVersion is the version of the registry file this build reads and
+// writes. The file is shared by three programs that are released separately,
+// so each write stamps it and each read checks it: a build that meets a file
+// from a newer one stops and says so, rather than rewriting names it does not
+// understand.
+//
+// Raise it when an older build could no longer read the file correctly — a
+// field changing meaning, an entry it must not prune. Adding an optional field
+// an older build can ignore does not need it.
+const FormatVersion = 1
+
+// formatKey holds the version, as an entry of its own. It lives beside
+// ingressKey and resolverKey rather than in a wrapper around the names, so
+// that a build from before the version existed still reads the file: it sees
+// one more entry it has no use for.
+const formatKey = "_format"
+
+// ErrNewerFormat reports a registry written by a newer doze than this one.
+type ErrNewerFormat struct {
+	Path string
+	Have int // the version in the file
+	Want int // the newest this build understands
+}
+
+func (e *ErrNewerFormat) Error() string {
+	return fmt.Sprintf("%s is format %d, written by a newer doze than this one (which understands up to %d): "+
+		"upgrade this program, or stop every doze program and remove the file", e.Path, e.Have, e.Want)
+}
+
 // Entry is one registered name.
 type Entry struct {
 	IP    string `json:"ip"`
@@ -30,6 +59,8 @@ type Entry struct {
 	// Empty means the name resolves but is not fronted, which is right for a
 	// service that is not HTTP.
 	Target string `json:"target,omitempty"`
+	// Format is set only on the entry that records the file's format version.
+	Format int `json:"format,omitempty"`
 }
 
 // Registry is a handle on the shared name file.
@@ -254,6 +285,10 @@ func (r *Registry) update(fn func(map[string]Entry) error) error {
 	case !os.IsNotExist(err):
 		return err
 	}
+	if f, ok := m[formatKey]; ok && f.Format > FormatVersion {
+		return &ErrNewerFormat{Path: r.path, Have: f.Format, Want: FormatVersion}
+	}
+	delete(m, formatKey) // not a name: kept out of every caller's view, stamped back below
 	for host, e := range m {
 		if !alive(e.PID) {
 			delete(m, host)
@@ -263,6 +298,11 @@ func (r *Registry) update(fn func(map[string]Entry) error) error {
 	if err := fn(m); err != nil {
 		return err
 	}
+	// The stamp carries this process's pid so that a build from before the
+	// version existed, which prunes every entry whose process is gone, keeps
+	// it for as long as a writer that understands it is running.
+	m[formatKey] = Entry{Format: FormatVersion, PID: r.pid, Owner: r.owner}
+	defer delete(m, formatKey) // callers that keep m must not see it
 
 	buf, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {

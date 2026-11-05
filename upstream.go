@@ -74,7 +74,7 @@ func own(ip string) bool {
 // block that has no domain of its own, which is what the machine asks for
 // everything else.
 func scutilResolvers() []string {
-	out, err := exec.Command("scutil", "--dns").Output()
+	out, err := exec.Command("/usr/sbin/scutil", "--dns").Output()
 	if err != nil {
 		return nil
 	}

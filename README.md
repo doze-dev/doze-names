@@ -71,9 +71,12 @@ lookup from 10 ms to over a second; 4,000 took a lookup to 150 seconds and
 `configd` was killed by its watchdog. So instead of an address per service
 there is one interface with the whole block routed to it, held by the daemon.
 It opens the interface and adds the route as root, then drops to the user who
-ran setup and does nothing but rewrite packets between a service's public
-address and its private port. It keeps no connection state, so restarting it
-loses nothing. CI runs it for real on macOS 14, 15 and 26: 2,000 services on
+ran setup and does two things: it rewrites packets between a service's public
+address and its private port, and it answers the zone whenever no doze
+program holds the resolver, so a domain routed to doze (`domains` on an
+app) is forwarded to the machine's own DNS, and means the real host again,
+the moment doze is not running. It keeps no connection state, so restarting
+it loses nothing. CI runs it for real on macOS 14, 15 and 26: 2,000 services on
 one port, `mDNSResponder` idle throughout, 2.6 to 4 Gbit/s through it.
 
 The daemon is a copy of whichever doze program ran setup, started with a

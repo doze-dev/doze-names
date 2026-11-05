@@ -34,9 +34,12 @@ const (
 	oldLaunchdPath = "/Library/LaunchDaemons/dev.doze.loopback.plist"
 
 	// netdVersion goes into the job, so a build whose daemon differs from the
-	// one installed sees a job that is not its own and installs again. Raise
-	// it whenever the daemon's behaviour changes.
-	netdVersion = "1"
+	// one installed sees a job that is not its own and installs again, and
+	// check reports the older daemon until it does. Raise it whenever the
+	// daemon's behaviour changes.
+	//   1  translates packets
+	//   2  also answers the zone when no doze program does (netd.go)
+	netdVersion = "2"
 )
 
 // launchdPlist starts the daemon at boot and keeps it running. It is told the
@@ -99,11 +102,18 @@ func check() Status {
 
 	up := gatewayUp()
 	detail := zone.cidr() + " served by the doze network daemon"
-	if !up {
+	switch {
+	case !up:
 		detail = "the doze network daemon is not running — services cannot hold canonical ports"
 		if _, err := os.Stat(launchdPath); err == nil {
 			detail += " (see " + helperLog + ")"
 		}
+	case netdOutdated(launchdPath):
+		// What runs is a copy made at setup, so it stays as it was until
+		// setup is run again; a job from before the daemon answered the
+		// zone leaves a routed domain dark whenever no stack runs.
+		up = false
+		detail = "the doze network daemon is from an older setup — run setup again (one sudo), so a routed domain is answered when no stack runs"
 	}
 	st.Steps = append(st.Steps, Step{Name: "network", Done: up, Detail: detail})
 
@@ -190,6 +200,17 @@ func uninstall(o Options) error {
 		fmt.Fprintln(o.out(), "✓ removed")
 	}
 	return nil
+}
+
+// netdOutdated reports that the job at path starts a daemon older than this
+// build's: it is there, and names another netdVersion, or none. launchd
+// runs what the job says, so the job is the version that runs.
+func netdOutdated(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return !strings.Contains(string(raw), "<key>DOZE_NETD_VERSION</key><string>"+netdVersion+"</string>")
 }
 
 // servesHome reports whether a live daemon translates from this zone's

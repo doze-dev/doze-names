@@ -47,8 +47,38 @@ func e2e(t *testing.T) *Registry {
 // foreground reports a daemon started by hand for this run (DOZE_NAMES_E2E=foreground)
 // and not installed: no launchd job, and a home of the test's own, so nothing
 // of the machine's real zone is touched. What needs the installed daemon or
-// the system resolver is skipped.
+// the system resolver is skipped. The daemon serves the resolver too, at
+// the address its environment says (netd.go): start it with the run's
+// DOZE_ZONE_RESOLVER, or it answers the machine's real zone from the
+// test's registry.
 func foreground() bool { return os.Getenv("DOZE_NAMES_E2E") == "foreground" }
+
+// The installed daemon answers the zone when no doze program does: a name
+// claimed here resolves at the zone's address while this process serves
+// nothing, and the registry says who answered.
+func TestNetworkDaemonAnswersTheZone(t *testing.T) {
+	r := e2e(t)
+	if foreground() {
+		t.Skip("a daemon started by hand serves whatever zone its environment names")
+	}
+	lease, err := r.Claim(Qualified("db", "zone"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	resp := ask(t, ResolverAddr(), lease.Name.Host)
+	if ancountOf(resp) != 1 || !net.IP(resp[len(resp)-4:]).Equal(lease.IP.To4()) {
+		t.Fatalf("%s answered %v at %s, want %s with this process serving nothing", lease.Name.Host, resp, ResolverAddr(), lease.IP)
+	}
+	h, ok := r.ResolverHolder()
+	if !ok {
+		t.Fatal("something answered that is not recorded in the registry")
+	}
+	t.Logf("%s (pid %d) answered", h.Owner, h.PID)
+	if h.Owner != netdOwner {
+		t.Logf("not the daemon: another doze program is serving on this machine")
+	}
+}
 
 // canBindReal is canBind as it is outside the tests.
 var canBindReal = canBind

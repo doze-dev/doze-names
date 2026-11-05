@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -360,36 +359,7 @@ func waitFor(t *testing.T, ok func() bool) {
 }
 
 func TestAnUnservedDomainIsForwardedUpstreamAndTheZoneNeverIs(t *testing.T) {
-	// A fake upstream that answers every A question with 203.0.113.9.
-	up, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer up.Close()
-	var asked []string
-	var mu sync.Mutex
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, addr, err := up.ReadFromUDP(buf)
-			if err != nil {
-				return
-			}
-			name, _, _, _ := parseQuestion(buf[:n], 12)
-			mu.Lock()
-			asked = append(asked, name)
-			mu.Unlock()
-			resp, _ := answer(buf[:n], func(string) net.IP { return net.IPv4(203, 0, 113, 9) })
-			// The real host's answer is cached for an hour; doze must not let it be.
-			if len(resp) >= 10 {
-				binary.BigEndian.PutUint32(resp[len(resp)-10:], 3600)
-			}
-			_, _ = up.WriteToUDP(resp, addr)
-		}
-	}()
-	old := upstreamAddrs
-	upstreamAddrs = func() []string { return []string{up.LocalAddr().String()} }
-	t.Cleanup(func() { upstreamAddrs = old })
+	asked := fakeUpstream(t)
 
 	r := Open(t.TempDir(), "doze")
 	web, _ := r.Claim(Qualified("web", "shop"))
@@ -441,10 +411,8 @@ func TestAnUnservedDomainIsForwardedUpstreamAndTheZoneNeverIs(t *testing.T) {
 	if _, rcode := ask("nope.shop.doze"); rcode != 3 {
 		t.Errorf("nope.shop.doze rcode = %d, want NXDOMAIN", rcode)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(asked) != 1 || asked[0] != "dev.other.com" {
-		t.Errorf("upstream was asked %v, want only dev.other.com", asked)
+	if got := asked(); len(got) != 1 || got[0] != "dev.other.com" {
+		t.Errorf("upstream was asked %v, want only dev.other.com", got)
 	}
 }
 

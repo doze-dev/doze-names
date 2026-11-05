@@ -7,11 +7,13 @@ package names
 // launchd starts it as root, because opening a tunnel interface and adding a
 // route need root. It does those two things, gives up root for good, and from
 // then on only reads the registry and copies packets as the user who ran
-// setup. It is any doze program run with helperArg — setup installs a copy of
+// setup, and answers the zone whenever no doze program is there to (netd.go).
+// It is any doze program run with helperArg — setup installs a copy of
 // whichever one the user had — so there is nothing separate to release or
 // keep in step.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -82,6 +84,9 @@ func runNetd(args []string) error {
 	if err := writeServing(registry); err != nil {
 		fmt.Fprintf(os.Stderr, "netd: cannot record that it serves %s: %v\n", registry, err)
 	}
+	// The zone's resolver, for as long as no doze program holds it. The
+	// daemon only ever stops by being killed, so its context never ends.
+	serveZone(context.Background(), registry, func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) })
 
 	cache := newTableCache(registry, zone)
 	// A rewrite of the file is noticed when a connection opens (below); this is

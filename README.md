@@ -81,7 +81,9 @@ one port, `mDNSResponder` idle throughout, 2.6 to 4 Gbit/s through it.
 
 The daemon is a copy of whichever doze program ran setup, started with a
 private argument. Every program's `main` therefore begins with
-`names.Helper()`, which is where that copy becomes the daemon.
+`names.Helper()`, which is where that copy becomes the daemon. Linux has
+the daemon too, for the resolver alone: a systemd unit runs the copy as the
+person who ran setup, on the zone's interface, so the same holds there.
 
 ### Listening
 

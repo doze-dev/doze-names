@@ -32,14 +32,6 @@ const (
 
 	// The job that aliased a pool of loopback addresses, before the daemon.
 	oldLaunchdPath = "/Library/LaunchDaemons/dev.doze.loopback.plist"
-
-	// netdVersion goes into the job, so a build whose daemon differs from the
-	// one installed sees a job that is not its own and installs again, and
-	// check reports the older daemon until it does. Raise it whenever the
-	// daemon's behaviour changes.
-	//   1  translates packets
-	//   2  also answers the zone when no doze program does (netd.go)
-	netdVersion = "2"
 )
 
 // launchdPlist starts the daemon at boot and keeps it running. It is told the
@@ -71,20 +63,6 @@ func launchdPlist(registry string, uid, gid int) string {
 
 func xmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
-}
-
-// setupUser is who the daemon serves: the person running setup, also when
-// they ran it under sudo.
-func setupUser() (uid, gid int, err error) {
-	uid, gid = os.Getuid(), os.Getgid()
-	if uid == 0 {
-		uid, _ = strconv.Atoi(os.Getenv("SUDO_UID"))
-		gid, _ = strconv.Atoi(os.Getenv("SUDO_GID"))
-	}
-	if uid <= 0 {
-		return 0, 0, fmt.Errorf("setup has to know whose services to serve: run it as yourself, not as root")
-	}
-	return uid, gid, nil
 }
 
 func resolverInstalled() bool {
@@ -202,15 +180,10 @@ func uninstall(o Options) error {
 	return nil
 }
 
-// netdOutdated reports that the job at path starts a daemon older than this
-// build's: it is there, and names another netdVersion, or none. launchd
-// runs what the job says, so the job is the version that runs.
+// netdOutdated reports that the launchd job at path starts a daemon older
+// than this build's (netd.go).
 func netdOutdated(path string) bool {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	return !strings.Contains(string(raw), "<key>DOZE_NETD_VERSION</key><string>"+netdVersion+"</string>")
+	return jobOutdated(path, "<key>DOZE_NETD_VERSION</key><string>"+netdVersion+"</string>")
 }
 
 // servesHome reports whether a live daemon translates from this zone's

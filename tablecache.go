@@ -43,10 +43,14 @@ func (c *tableCache) refresh(force bool) {
 	// The stamp is taken before the file is read: a write that lands in
 	// between makes the next refresh see a different stamp and read again,
 	// where taking it afterwards could record a stamp for a table that
-	// predates it.
+	// predates it. The inode is part of it because the time is not enough:
+	// two writes inside one tick of the file system's clock (ext4 keeps
+	// jiffies, a few milliseconds) that leave the size the same, a restart
+	// that swaps one five-digit port for another, looked like no write at
+	// all, and the table sent the next connection to the old port.
 	stamp := ""
 	if st, err := os.Stat(c.path); err == nil {
-		stamp = strconv.FormatInt(st.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(st.Size(), 10)
+		stamp = strconv.FormatUint(fileID(st), 10) + "/" + strconv.FormatInt(st.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(st.Size(), 10)
 	}
 	if !force && stamp == c.stamp {
 		return

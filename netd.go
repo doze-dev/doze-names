@@ -19,12 +19,57 @@ package names
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
+
+// setupUser is who the daemon serves: the person running setup, also when
+// they ran it under sudo.
+func setupUser() (uid, gid int, err error) {
+	uid, gid = os.Getuid(), os.Getgid()
+	if uid == 0 {
+		uid, _ = strconv.Atoi(os.Getenv("SUDO_UID"))
+		gid, _ = strconv.Atoi(os.Getenv("SUDO_GID"))
+	}
+	if uid <= 0 {
+		return 0, 0, fmt.Errorf("setup has to know whose services to serve: run it as yourself, not as root")
+	}
+	return uid, gid, nil
+}
 
 // netdOwner is how the daemon signs the registry while it serves: what a
 // peer logs when it stands by, and what doctor names as the resolver.
 const netdOwner = "doze-netd"
+
+// netdVersion goes into the daemon's job (the launchd plist, the systemd
+// unit), so a build whose daemon differs from the one installed sees a job
+// that is not its own and installs again, and check reports the older
+// daemon until it does. Raise it whenever the daemon's behaviour changes.
+//
+//	1  translates packets (macOS)
+//	2  also answers the zone when no doze program does; on Linux, the
+//	   daemon exists from this version and does only that
+const netdVersion = "2"
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// jobOutdated reports that the job at path starts a daemon older than this
+// build's: it is there, and does not carry stamp, the platform's spelling
+// of this build's netdVersion. The daemon is the copy setup made, so the
+// job is the version that runs.
+func jobOutdated(path, stamp string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return !strings.Contains(string(raw), stamp)
+}
 
 // serveZone holds the resolver from the registry at path, on the zone's
 // address, for as long as ctx lasts, standing by while a doze program has

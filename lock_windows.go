@@ -19,6 +19,9 @@ var (
 
 const lockfileExclusiveLock = 0x2
 
+// fileID has no inode to give on Windows; the time and size have to do.
+func fileID(os.FileInfo) uint64 { return 0 }
+
 // lockFile takes an exclusive lock on f, blocking until it has it, and returns the
 // function that releases it. One byte at offset 0 is locked: the file is a sidecar
 // used only for this, so what is locked does not matter, only that it is the same

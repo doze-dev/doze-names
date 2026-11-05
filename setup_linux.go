@@ -30,7 +30,62 @@ const (
 	resolvConf  = "/etc/resolv.conf"
 	unitPath    = "/etc/systemd/system/doze-names.service"
 	unitName    = "doze-names.service"
+
+	// The daemon that answers the zone when no doze program does (netd.go):
+	// a copy of the program that ran setup, and its unit.
+	netdPath     = "/usr/local/libexec/doze-netd"
+	netdUnitPath = "/etc/systemd/system/doze-netd.service"
+	netdUnitName = "doze-netd.service"
+	netdStamp    = "Environment=DOZE_NETD_VERSION=" + netdVersion
 )
+
+// netdUnit runs the daemon as the person who ran setup, after the zone unit
+// has made the interface the resolver binds, and keeps it running.
+func netdUnit(registry string, uid, gid int) string {
+	return `[Unit]
+Description=doze: answers the ` + Suffix + ` zone when no doze program does
+After=` + unitName + `
+Wants=` + unitName + `
+
+[Service]
+User=` + fmt.Sprint(uid) + `
+Group=` + fmt.Sprint(gid) + `
+` + netdStamp + `
+ExecStart=` + netdPath + ` ` + helperArg + ` ` + registry + `
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+`
+}
+
+// netdOutdated reports that the unit starts a daemon older than this build's
+// (netd.go).
+func netdOutdated() bool { return jobOutdated(netdUnitPath, netdStamp) }
+
+// netdActive reports whether systemd has the daemon running.
+func netdActive() bool {
+	out, err := exec.Command("systemctl", "is-active", netdUnitName).Output()
+	return err == nil && strings.TrimSpace(string(out)) == "active"
+}
+
+// netdStep is the daemon's line in check: in place only when the unit is
+// this build's and running.
+func netdStep() Step {
+	st := Step{Name: "network daemon", Detail: "answers the zone when no doze program runs, so a routed domain is never dark"}
+	switch {
+	case !fileExists(netdUnitPath):
+		st.Detail = "not installed — a routed domain is unreachable while no stack runs"
+	case netdOutdated():
+		st.Detail = "from an older setup — run setup again (one sudo), so a routed domain is answered when no stack runs"
+	case !netdActive():
+		st.Detail = "installed but not running (systemctl status " + netdUnitName + ")"
+	default:
+		st.Done = true
+	}
+	return st
+}
 
 // zoneUnit creates the resolver's interface and, on a systemd-resolved machine,
 // points resolved at it.
@@ -169,6 +224,7 @@ func check() Status {
 			detail = "not configured — only apex names will resolve"
 		}
 		st.Steps = append(st.Steps, Step{Name: "resolver route", Done: resolverRouteInstalled(m), Detail: detail})
+		st.Steps = append(st.Steps, netdStep())
 	default:
 		st.Steps = append(st.Steps, Step{
 			Name: "resolver route", Done: true,
@@ -238,11 +294,27 @@ func install(o Options) error {
 				shellQuote(fmt.Sprintf("server=/%s/%s#%s\n", Suffix, resolverIP, resolverPort)), dnsmasqDrop)
 			b.WriteString("systemctl restart dnsmasq 2>/dev/null || true\n")
 		}
+		// The daemon that answers the zone from that interface when no doze
+		// program does: a copy of this program, so it does not vanish when
+		// the program is upgraded or moved, run as the person who ran setup.
+		// Restarted, so re-running setup puts the new copy to work.
+		uid, gid, err := setupUser()
+		if err != nil {
+			return err
+		}
+		self, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("setup: cannot find this program to install as the daemon: %w", err)
+		}
+		fmt.Fprintf(&b, "mkdir -p %s && cp -f %s %s && chown root:root %s && chmod 755 %s\n",
+			shellQuote(filepath.Dir(netdPath)), shellQuote(self), netdPath, netdPath, netdPath)
+		fmt.Fprintf(&b, "printf %s > %s\n", shellQuote(netdUnit(filepath.Join(Home(), FileName), uid, gid)), netdUnitPath)
+		fmt.Fprintf(&b, "systemctl daemon-reload && systemctl enable --now %s && systemctl restart %s\n", netdUnitName, netdUnitName)
 	}
 
 	what := "apply the sysctl, write the " + hostsPath + " block"
 	if canRouteDomain(m, dnsmasqPresent()) {
-		what += ", and route ." + Suffix + " to the resolver"
+		what += ", route ." + Suffix + " to the resolver, and install the daemon that answers it when no stack runs"
 	}
 	if err := runPrivileged(o, what, b.String()); err != nil {
 		return err
@@ -271,9 +343,10 @@ func uninstall(o Options) error {
 
 	var b strings.Builder
 	b.WriteString("set -e\n")
+	fmt.Fprintf(&b, "systemctl disable --now %s 2>/dev/null || true\n", netdUnitName)
 	fmt.Fprintf(&b, "systemctl disable --now %s 2>/dev/null || true\n", unitName)
 	fmt.Fprintf(&b, "ip link del %s 2>/dev/null || true\n", resolverIface)
-	fmt.Fprintf(&b, "rm -f %s %s %s\n", sysctlPath, unitPath, dnsmasqDrop)
+	fmt.Fprintf(&b, "rm -f %s %s %s %s %s\n", sysctlPath, unitPath, dnsmasqDrop, netdUnitPath, netdPath)
 	b.WriteString("systemctl daemon-reload 2>/dev/null || true\n")
 	fmt.Fprintf(&b, "printf %s > %s\n", shellQuote(stripped), hostsPath)
 	b.WriteString("sysctl -q --system 2>/dev/null || true\n")
@@ -284,7 +357,7 @@ func uninstall(o Options) error {
 	b.WriteString("systemctl restart systemd-resolved 2>/dev/null || true\n")
 	b.WriteString("systemctl restart dnsmasq 2>/dev/null || true\n")
 	// The domains' routes drop-in and the authority's trust go too.
-	fmt.Fprintf(&b, "rm -f %s\n", shellQuote(routesDropIn))
+	fmt.Fprintf(&b, "rm -rf %s\n", shellQuote(filepath.Dir(routesDropIn)))
 	for _, line := range cleanupScript(Home()) {
 		b.WriteString(line + "\n")
 	}

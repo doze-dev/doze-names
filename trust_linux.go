@@ -15,7 +15,7 @@ import (
 // distribution's bundle: Debian's update-ca-certificates or Fedora's
 // update-ca-trust, whichever is there.
 
-const routesDropIn = "/etc/systemd/system/doze-zone.service.d/domains.conf"
+const routesDropIn = "/etc/systemd/system/" + unitName + ".d/domains.conf"
 
 func platformTrust() error { return nil }
 

@@ -582,6 +582,18 @@ func (c *CA) Bundle() (string, error) {
 // BundlePath is where Bundle writes.
 func (c *CA) BundlePath() string { return filepath.Join(c.dir, bundleName) }
 
+// EnsureBundle is Bundle unless a bundle at least as new as the root is
+// there already: for a surface run often (doze env in a shell hook) that
+// must point at a bundle but need not rewrite it each time.
+func (c *CA) EnsureBundle() (string, error) {
+	b, err1 := os.Stat(c.BundlePath())
+	r, err2 := os.Stat(c.RootPath())
+	if err1 == nil && err2 == nil && !b.ModTime().Before(r.ModTime()) && b.Size() > 0 {
+		return c.BundlePath(), nil
+	}
+	return c.Bundle()
+}
+
 func sameFile(a, b string) bool {
 	sa, err1 := os.Stat(a)
 	sb, err2 := os.Stat(b)

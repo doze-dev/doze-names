@@ -82,7 +82,7 @@ type Registry struct {
 	// can be put back: a writer built before Entry.Ports existed (an older
 	// doze-aws, say) rewrites the file without them, and the network
 	// daemon then refuses every connection to the name. See heal.
-	fwdMu    sync.Mutex
+	fwdMu sync.Mutex
 	// portMu orders setPort's two writes (registry, then the ports file)
 	// so two of this process's changes to one name cannot land out of order.
 	portMu   sync.Mutex

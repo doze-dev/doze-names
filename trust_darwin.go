@@ -50,9 +50,12 @@ func caTrusted(ca *CA) (bool, string) {
 }
 
 func trustScript(ca *CA) string {
-	return fmt.Sprintf("security add-trusted-cert -d -r trustRoot -k %s %s", systemKeychain, shellQuote(ca.RootPath()))
+	// Trusted for TLS and basic certificate chaining only, as mkcert does:
+	// never for code signing or mail.
+	return fmt.Sprintf("security add-trusted-cert -d -r trustRoot -p ssl -p basic -k %s %s", systemKeychain, shellQuote(ca.RootPath()))
 }
 
 func untrustScript(ca *CA) string {
-	return fmt.Sprintf("security delete-certificate -Z %s %s 2>/dev/null || true", ca.Fingerprint(), systemKeychain)
+	// -t drops the trust settings with it.
+	return fmt.Sprintf("security delete-certificate -t -Z %s %s 2>/dev/null || true", ca.Fingerprint(), systemKeychain)
 }

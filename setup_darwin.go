@@ -91,7 +91,7 @@ func check() Status {
 		// setup is run again; a job from before the daemon answered the
 		// zone leaves a routed domain dark whenever no stack runs.
 		up = false
-		detail = "the doze network daemon is from an older setup — run setup again (one sudo), so a routed domain is answered when no stack runs"
+		detail = "the doze network daemon is from an older doze — run setup again (one password) for this one: it keeps every service reachable when other doze programs share the machine"
 	}
 	st.Steps = append(st.Steps, Step{Name: "network", Done: up, Detail: detail})
 

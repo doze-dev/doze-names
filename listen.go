@@ -78,6 +78,8 @@ func (l *Lease) setPort(public, private int) error {
 	if public <= 0 || public > 65535 {
 		return fmt.Errorf("%s: port %d is not a port", l.Name.Host, public)
 	}
+	l.reg.portMu.Lock()
+	defer l.reg.portMu.Unlock()
 	var after map[string]int
 	err := l.reg.update(func(m map[string]Entry) error {
 		e, ok := m[l.Name.Host]
@@ -103,7 +105,7 @@ func (l *Lease) setPort(public, private int) error {
 	})
 	if err == nil {
 		l.reg.remember(l.Name.Host, public, private)
-		err = writePorts(l.reg.path, l.Name.Host, l.reg.pid, after)
+		err = writePorts(l.reg.path, l.Name.Host, l.IP.String(), l.reg.pid, after)
 	}
 	return err
 }
@@ -180,7 +182,7 @@ func readPortTable(path string, n network) *portTable {
 			t.toPrivate[v][public], t.toPublic[v][private] = private, public
 		}
 		ports := e.Ports
-		if s, ok := side[host]; ok && s.PID == e.PID && len(s.Ports) > 0 {
+		if s, ok := side[host]; ok && s.PID == e.PID && (s.IP == "" || s.IP == e.IP) && len(s.Ports) > 0 {
 			ports = map[string]int{}
 			for k, v := range e.Ports {
 				ports[k] = v

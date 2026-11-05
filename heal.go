@@ -102,3 +102,15 @@ func (r *Registry) heal() {
 		}
 	}
 }
+
+// forget drops every forward this process kept for host, here and in the
+// ports file: the name was released, or claimed again at another address.
+func (r *Registry) forget(host string) {
+	r.fwdMu.Lock()
+	_, had := r.forwards[host]
+	delete(r.forwards, host)
+	r.fwdMu.Unlock()
+	if had {
+		_ = writePorts(r.path, host, "", r.pid, nil)
+	}
+}

@@ -17,7 +17,10 @@ const PortsFile = "names.ports.json"
 
 // portsEntry is one host's translated ports, and whose they are.
 type portsEntry struct {
-	PID   int            `json:"pid"`
+	PID int `json:"pid"`
+	// IP is the address the ports were set at: a name claimed again at
+	// another address does not carry them.
+	IP    string         `json:"ip,omitempty"`
 	Ports map[string]int `json:"ports"`
 }
 
@@ -40,7 +43,7 @@ func readPorts(registry string) map[string]portsEntry {
 
 // writePorts sets host's ports for pid in the ports file, dropping hosts
 // whose process is gone, under its own lock and with an atomic rename.
-func writePorts(registry, host string, pid int, ports map[string]int) error {
+func writePorts(registry, host, ip string, pid int, ports map[string]int) error {
 	path := portsPath(registry)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -62,9 +65,11 @@ func writePorts(registry, host string, pid int, ports map[string]int) error {
 		}
 	}
 	if len(ports) == 0 {
-		delete(m, host)
+		if m[host].PID == pid {
+			delete(m, host)
+		}
 	} else {
-		m[host] = portsEntry{PID: pid, Ports: ports}
+		m[host] = portsEntry{PID: pid, IP: ip, Ports: ports}
 	}
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {

@@ -83,6 +83,9 @@ type Registry struct {
 	// doze-aws, say) rewrites the file without them, and the network
 	// daemon then refuses every connection to the name. See heal.
 	fwdMu    sync.Mutex
+	// portMu orders setPort's two writes (registry, then the ports file)
+	// so two of this process's changes to one name cannot land out of order.
+	portMu   sync.Mutex
 	forwards map[string]map[string]int
 	healing  bool
 }
@@ -161,6 +164,7 @@ func (l *Lease) Twin(n Name) (*Lease, error) { return l.reg.claim(n, l.IP, true)
 
 func (r *Registry) claim(n Name, want net.IP, shared bool) (*Lease, error) {
 	var lease *Lease
+	moved := false // claimed again at another address: its old ports go
 	err := r.update(func(m map[string]Entry) error {
 		if cur, ok := m[n.Host]; ok && cur.PID != r.pid && alive(cur.PID) {
 			// Qualified names are per-stack and should not collide; if one
@@ -194,6 +198,8 @@ func (r *Registry) claim(n Name, want net.IP, shared bool) (*Lease, error) {
 			e.Target = cur.Target
 			if cur.IP == e.IP {
 				e.Ports = cur.Ports
+			} else {
+				moved = true
 			}
 		}
 		m[n.Host] = e
@@ -203,6 +209,9 @@ func (r *Registry) claim(n Name, want net.IP, shared bool) (*Lease, error) {
 	if err != nil {
 		return nil, err
 	}
+	if moved {
+		r.forget(n.Host)
+	}
 	return lease, nil
 }
 
@@ -211,12 +220,14 @@ func (l *Lease) Release() error {
 	if l == nil || l.reg == nil {
 		return nil
 	}
-	return l.reg.update(func(m map[string]Entry) error {
+	err := l.reg.update(func(m map[string]Entry) error {
 		if e, ok := m[l.Name.Host]; ok && e.PID == l.reg.pid {
 			delete(m, l.Name.Host)
 		}
 		return nil
 	})
+	l.reg.forget(l.Name.Host)
+	return err
 }
 
 // Snapshot returns the live entries, pruning any whose process has gone.

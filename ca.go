@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -47,6 +48,9 @@ type CA struct {
 
 	mu    sync.Mutex
 	leafs map[string]*tls.Certificate // by the domain entry they were minted for
+	// previous are the fingerprints of roots rotated out that may still be
+	// trusted on the machine, until a prompt removes them.
+	previous []string
 }
 
 // CADir is where the authority lives under a doze home.
@@ -57,20 +61,61 @@ func CADir(home string) string { return filepath.Join(home, caDirName) }
 func (c *CA) RootPath() string { return filepath.Join(c.dir, caCertName) }
 
 // LoadOrCreateCA opens the authority under dir, making it when there is
-// none. The key file is readable by its owner only.
+// none. The key file is readable by its owner only. Two daemons starting
+// together on a fresh home make one authority between them: creation is
+// under a lock, and the loser loads what the winner wrote. A file that is
+// there but cannot be read is an error, never silently replaced: the
+// keychain may trust it.
 func LoadOrCreateCA(dir string) (*CA, error) {
-	c := &CA{dir: dir, leafs: map[string]*tls.Certificate{}}
-	certPEM, err1 := os.ReadFile(filepath.Join(dir, caCertName))
-	keyPEM, err2 := os.ReadFile(filepath.Join(dir, caKeyName))
-	if err1 == nil && err2 == nil {
-		if err := c.load(certPEM, keyPEM); err == nil && time.Now().Before(c.cert.NotAfter.Add(-leafLife)) {
-			return c, nil
-		}
+	if c, ok, err := openCA(dir); ok || err != nil {
+		return c, err
 	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	unlock, err := lockFile(lock)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if c, ok, err := openCA(dir); ok || err != nil {
+		return c, err // the other daemon got here first
+	}
+	c := &CA{dir: dir, leafs: map[string]*tls.Certificate{}}
 	if err := c.create(); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+// openCA loads the authority: ok is false when there is none, err says one
+// is there and unreadable, or expiring within a leaf's life.
+func openCA(dir string) (*CA, bool, error) {
+	c := &CA{dir: dir, leafs: map[string]*tls.Certificate{}}
+	certPEM, err1 := os.ReadFile(filepath.Join(dir, caCertName))
+	keyPEM, err2 := os.ReadFile(filepath.Join(dir, caKeyName))
+	if os.IsNotExist(err1) && os.IsNotExist(err2) {
+		return nil, false, nil
+	}
+	if err1 != nil {
+		return nil, false, err1
+	}
+	if err2 != nil {
+		return nil, false, err2
+	}
+	if err := c.load(certPEM, keyPEM); err != nil {
+		return nil, false, fmt.Errorf("%s: %w (doze trust --rotate makes a new authority)", dir, err)
+	}
+	if !time.Now().Before(c.cert.NotAfter.Add(-leafLife)) {
+		return nil, false, fmt.Errorf("the authority in %s expires on %s: doze trust --rotate makes a new one", dir, c.cert.NotAfter.Format("2006-01-02"))
+	}
+	c.previous = readPrevious(dir)
+	return c, true, nil
 }
 
 func (c *CA) load(certPEM, keyPEM []byte) error {
@@ -145,12 +190,56 @@ func (c *CA) create() error {
 }
 
 // Rotate replaces the authority with a new one; everything minted before
-// is dropped. The new root needs trusting again.
+// is dropped. The new root needs trusting again, and the old one's
+// fingerprint is kept so the same prompt stops trusting it.
 func (c *CA) Rotate() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	old := c.Fingerprint()
 	c.leafs = map[string]*tls.Certificate{}
-	return c.create()
+	if err := c.create(); err != nil {
+		return err
+	}
+	c.previous = append(c.previous, old)
+	return writePrevious(c.dir, c.previous)
+}
+
+// Previous are the fingerprints of rotated-out roots not yet untrusted.
+func (c *CA) Previous() []string { return append([]string(nil), c.previous...) }
+
+// forgetUntrustedPrevious drops the rotated-out roots the machine no longer
+// trusts.
+func (c *CA) forgetUntrustedPrevious() error {
+	var keep []string
+	for _, fp := range c.previous {
+		if trusted, _ := fingerprintTrusted(fp); trusted {
+			keep = append(keep, fp)
+		}
+	}
+	c.previous = keep
+	return writePrevious(c.dir, keep)
+}
+
+const previousName = "previous.json"
+
+func readPrevious(dir string) []string {
+	var out []string
+	if b, err := os.ReadFile(filepath.Join(dir, previousName)); err == nil {
+		_ = json.Unmarshal(b, &out)
+	}
+	return out
+}
+
+func writePrevious(dir string, fps []string) error {
+	if len(fps) == 0 {
+		err := os.Remove(filepath.Join(dir, previousName))
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	b, _ := json.Marshal(fps)
+	return writeFileAtomic(filepath.Join(dir, previousName), b, 0o644)
 }
 
 // Subject is the root's common name, which is how the keychain lists it.
@@ -175,8 +264,13 @@ func (r *Registry) GetCertificate(ca *CA) func(*tls.ClientHelloInfo) (*tls.Certi
 		if hello.ServerName == "" {
 			return nil, errors.New("doze: no server name in the handshake")
 		}
+		// Only this machine is answered, as on the plain port: a LAN peer
+		// learns nothing about what is served here.
+		if hello.Conn != nil && !fromThisMachine(hello.Conn.RemoteAddr().String()) {
+			return nil, errors.New("doze names are served to this machine only")
+		}
 		m := r.Snapshot()
-		e, ok := lookupDomain(m, hello.ServerName)
+		e, owner, ok := lookupDomain(m, hello.ServerName)
 		if !ok {
 			return nil, fmt.Errorf("doze: %s is not a domain this machine serves", hello.ServerName)
 		}
@@ -191,25 +285,7 @@ func (r *Registry) GetCertificate(ca *CA) func(*tls.ClientHelloInfo) (*tls.Certi
 		if ca == nil {
 			return nil, fmt.Errorf("doze: no certificate for %s: no authority and no files", hello.ServerName)
 		}
-		return ca.Leaf(ownerOf(m, hello.ServerName))
-	}
-}
-
-// ownerOf is the registered domain (exact or wildcard) that owns host.
-func ownerOf(m map[string]Entry, host string) string {
-	h := normalize(host)
-	if e, ok := m[h]; ok && e.Tier == TierDomain {
-		return h
-	}
-	for {
-		_, rest, found := strings.Cut(h, ".")
-		if !found || !strings.Contains(rest, ".") {
-			return normalize(host)
-		}
-		if e, ok := m["*."+rest]; ok && e.Tier == TierDomain {
-			return "*." + rest
-		}
-		h = rest
+		return ca.Leaf(owner)
 	}
 }
 
@@ -293,13 +369,9 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 }
 
 // OpenCA opens the authority under dir without making one: for a surface
-// that only reports on it. ok is false when there is none yet.
+// that only reports on it. ok is false when there is none, or it cannot be
+// read.
 func OpenCA(dir string) (*CA, bool) {
-	c := &CA{dir: dir, leafs: map[string]*tls.Certificate{}}
-	certPEM, err1 := os.ReadFile(filepath.Join(dir, caCertName))
-	keyPEM, err2 := os.ReadFile(filepath.Join(dir, caKeyName))
-	if err1 != nil || err2 != nil || c.load(certPEM, keyPEM) != nil {
-		return nil, false
-	}
-	return c, true
+	c, ok, err := openCA(dir)
+	return c, ok && err == nil
 }

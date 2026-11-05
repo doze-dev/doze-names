@@ -179,10 +179,14 @@ func uninstall(o Options) error {
 		"rm -f " + launchdPath + " " + oldLaunchdPath + " " + helperPath,
 		"rm -f " + resolverFile,
 	}, "\n")
-	if err := runPrivileged(o, "remove the network daemon and the resolver route", script); err != nil {
+	if extra := cleanupScript(Home()); len(extra) > 0 {
+		script += "\n" + strings.Join(extra, "\n")
+	}
+	if err := runPrivileged(o, "remove the network daemon, the resolver route, the domains' routes and the certificate authority", script); err != nil {
 		return err
 	}
 	if !o.Print {
+		cleanupAfter(Home())
 		fmt.Fprintln(o.out(), "✓ removed")
 	}
 	return nil

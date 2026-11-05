@@ -283,11 +283,17 @@ func uninstall(o Options) error {
 	// having configured it.
 	b.WriteString("systemctl restart systemd-resolved 2>/dev/null || true\n")
 	b.WriteString("systemctl restart dnsmasq 2>/dev/null || true\n")
+	// The domains' routes drop-in and the authority's trust go too.
+	fmt.Fprintf(&b, "rm -f %s\n", shellQuote(routesDropIn))
+	for _, line := range cleanupScript(Home()) {
+		b.WriteString(line + "\n")
+	}
 
-	if err := runPrivileged(o, "remove the sysctl, the hosts block and the resolver route", b.String()); err != nil {
+	if err := runPrivileged(o, "remove the sysctl, the hosts block, the resolver route, the domains' routes and the certificate authority", b.String()); err != nil {
 		return err
 	}
 	if !o.Print {
+		cleanupAfter(Home())
 		fmt.Fprintln(o.out(), "✓ removed")
 	}
 	return nil

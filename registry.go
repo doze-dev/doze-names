@@ -260,7 +260,8 @@ func (r *Registry) lookup(host string) (Entry, bool) {
 	m := r.Snapshot()
 	if !InZone(host) {
 		// Outside the zone only a domain an app declared answers (domains.go).
-		return lookupDomain(m, host)
+		e, _, ok := lookupDomain(m, host)
+		return e, ok
 	}
 	h := normalize(host)
 	for h != Suffix {

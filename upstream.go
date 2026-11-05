@@ -58,8 +58,12 @@ func (u *upstreams) find() []string {
 
 // own says an address is one of ours or a local stub that would loop.
 func own(ip string) bool {
+	// 127.0.0.1:53 is a real upstream when a local forwarder (dnscrypt,
+	// Pi-hole, dnsmasq) runs there: this resolver is on another port. The
+	// resolved stub and the zone's own address would route the domain
+	// straight back here.
 	switch ip {
-	case "127.0.0.1", "::1", "127.0.0.53", "127.0.0.54", resolverIP:
+	case "127.0.0.53", "127.0.0.54", resolverIP:
 		return true
 	}
 	return false

@@ -437,3 +437,91 @@ func TestAnUnservedDomainIsForwardedUpstreamAndTheZoneNeverIs(t *testing.T) {
 		t.Errorf("upstream was asked %v, want only dev.other.com", asked)
 	}
 }
+
+func TestValidDomainRefusesWhatAShellOrAPathCouldMisread(t *testing.T) {
+	for _, bad := range []string{"dev.acme.com;rm", "dev.acme.com'x", "dev.acme.com$(id)", "../etc", "dev/acme.com", "dev.acme.com\n", "dev acme.com", "dev.acme.com\\x", "*.acme.com/x", "dev..acme.com", ".acme.com"} {
+		if err := ValidDomain(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestAWildcardOwnsTheNameUnderItAndOneLevelBelow(t *testing.T) {
+	r := Open(t.TempDir(), "doze")
+	web, _ := r.Claim(Qualified("web", "shop"))
+	t.Cleanup(func() { _ = web.Release() })
+	if _, err := web.Twin(DomainName("*.dev.acme.com")); err != nil {
+		t.Fatal(err)
+	}
+	m := r.Snapshot()
+	for _, h := range []string{"dev.acme.com", "tenant.dev.acme.com", "a.b.dev.acme.com"} {
+		if _, owner, ok := lookupDomain(m, h); !ok || owner != "*.dev.acme.com" {
+			t.Errorf("%s: owner %q ok=%v", h, owner, ok)
+		}
+	}
+	if _, _, ok := lookupDomain(m, "acme.com"); ok {
+		t.Error("the parent of a wildcard is not owned")
+	}
+	ca, _ := LoadOrCreateCA(filepath.Join(t.TempDir(), "ca"))
+	get := r.GetCertificate(ca)
+	crt, err := get(&tls.ClientHelloInfo{ServerName: "dev.acme.com"})
+	if err != nil || crt.Leaf.VerifyHostname("dev.acme.com") != nil {
+		t.Errorf("the name under a wildcard is served and covered: %v", err)
+	}
+	if crt.Leaf.VerifyHostname("a.b.dev.acme.com") == nil {
+		t.Error("a certificate covers one level only; a deeper name is documented, not served")
+	}
+	// A peer that is not this machine gets no certificate.
+	lan, _ := net.ResolveTCPAddr("tcp", "192.168.1.50:5555")
+	if _, err := get(&tls.ClientHelloInfo{ServerName: "dev.acme.com", Conn: fakeConn{lan}}); err == nil {
+		t.Error("a LAN peer was served a certificate")
+	}
+}
+
+type fakeConn struct{ remote net.Addr }
+
+func (c fakeConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (c fakeConn) Write(b []byte) (int, error)      { return len(b), nil }
+func (c fakeConn) Close() error                     { return nil }
+func (c fakeConn) LocalAddr() net.Addr              { return c.remote }
+func (c fakeConn) RemoteAddr() net.Addr             { return c.remote }
+func (c fakeConn) SetDeadline(time.Time) error      { return nil }
+func (c fakeConn) SetReadDeadline(time.Time) error  { return nil }
+func (c fakeConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestADroppedDomainIsStaleWhileItsRouteRemainsAndForgottenWhenItGoes(t *testing.T) {
+	home := t.TempDir()
+	shop := filepath.Join(t.TempDir(), "shop")
+	_ = os.MkdirAll(shop, 0o755)
+	_ = os.WriteFile(filepath.Join(shop, "doze.hcl"), []byte("stack = \"x\"\n"), 0o644)
+	routed := map[string]bool{"dev.acme.com": true}
+	old := routedCheck
+	routedCheck = func(d string) bool { return routed[d] }
+	t.Cleanup(func() { routedCheck = old })
+
+	_ = RecordDomains(home, shop, []string{"dev.acme.com", "*.dev.acme.com"})
+	if s := StaleRoutes(home); len(s) != 0 {
+		t.Fatalf("declared and routed is not stale: %v", s)
+	}
+	// Dropped from the config while the machine still routes it: stale.
+	_ = RecordDomains(home, shop, nil)
+	if s := StaleRoutes(home); len(s) != 1 || s[0] != "dev.acme.com" {
+		t.Fatalf("stale = %v", s)
+	}
+	// A request to trust something else prunes it; once the route is gone
+	// the record forgets it.
+	req := TrustRequest{Domains: []string{"api.acme.com"}, Home: home, Prune: StaleRoutes(home)}
+	if set := req.routeSet(); len(set) != 1 || set[0] != "api.acme.com" {
+		t.Errorf("routeSet = %v, want only the new domain", set)
+	}
+	routed["dev.acme.com"] = false
+	_ = RouteRemoved(home, "dev.acme.com")
+	if _, ok := readRoutes(home)["dev.acme.com"]; ok {
+		t.Error("a removed route is forgotten")
+	}
+	// A crafted key in the file never reaches a script.
+	_ = os.WriteFile(routesPath(home), []byte(`{"dev.acme.com; rm -rf /": ["`+shop+`"], "ok.acme.com": ["`+shop+`"]}`), 0o644)
+	if got := RecordedRoutes(home); len(got) != 1 || got[0] != "ok.acme.com" {
+		t.Errorf("RecordedRoutes = %v", got)
+	}
+}

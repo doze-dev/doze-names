@@ -182,6 +182,11 @@ func serveConn(ctx context.Context, conn *net.UDPConn, resolve Resolve) {
 			return
 		}
 		resp, fwd := answer(buf[:n], resolve)
+		if fwd && !askedFromHere(addr) {
+			// Forwarding is for this machine, not for whoever can reach the
+			// socket: anyone else gets the NXDOMAIN.
+			fwd = false
+		}
 		if fwd {
 			// A domain routed here whose stack is down: the internet's answer,
 			// relayed, so the name means what it means when doze is not claiming it.
@@ -319,4 +324,14 @@ func isAddrInUse(err error) bool {
 		return errors.Is(op.Err, syscall.EADDRINUSE)
 	}
 	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+// askedFromHere says a query came from this machine: loopback, or the
+// zone's own address on Linux, where the resolver answers for its
+// interface.
+func askedFromHere(addr *net.UDPAddr) bool {
+	if addr == nil {
+		return false
+	}
+	return addr.IP.IsLoopback() || addr.IP.String() == resolverIP || OnThisMachine(addr.IP)
 }

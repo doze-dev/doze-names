@@ -305,6 +305,12 @@ func withHTTPSRedirect(r *Registry, on bool, next http.Handler) http.Handler {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		// The peer check comes first, as on the plain door: a refused peer
+		// learns nothing, not even which names are domains.
+		if !fromThisMachine(req.RemoteAddr) {
+			next.ServeHTTP(w, req)
+			return
+		}
 		if req.TLS == nil && r.IsDomain(req.Host) {
 			u := "https://" + hostOnly(req.Host) + req.URL.RequestURI()
 			http.Redirect(w, req, u, http.StatusTemporaryRedirect)

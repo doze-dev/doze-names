@@ -7,38 +7,56 @@ import (
 	"strings"
 )
 
-// Linux: a route is one more domain resolved sends to the doze0 link, set
-// at runtime with resolvectl and kept in the zone unit's drop-in so it
-// survives a reboot; the hosts-file machines (no resolved) get the apex
-// name only, as the zone does. The authority goes into the distribution's
-// bundle: Debian's update-ca-certificates or Fedora's update-ca-trust,
-// whichever is there.
+// Linux: the routes are the link's domain list in systemd-resolved, one
+// setting that holds the zone and every domain together, so it is always
+// restated whole: at runtime with resolvectl, and in a drop-in of the zone
+// unit so a reboot sets it again. Machines without resolved have no route
+// for a domain; the name works with its port. The authority goes into the
+// distribution's bundle: Debian's update-ca-certificates or Fedora's
+// update-ca-trust, whichever is there.
 
 const routesDropIn = "/etc/systemd/system/doze-zone.service.d/domains.conf"
+
+func platformTrust() error { return nil }
+
+// linkDomains is the link's domain list as resolved reports it, one token
+// each ("~doze", "~dev.acme.com").
+func linkDomains() []string {
+	out, err := exec.Command("resolvectl", "domain", resolverIface).Output()
+	if err != nil {
+		return nil
+	}
+	_, rest, _ := strings.Cut(string(out), ":")
+	return strings.Fields(rest)
+}
 
 func domainRouted(domain string) (bool, string) {
 	if detect() != mgrResolved {
 		return false, domain + " needs systemd-resolved to be routed; use the name with its port"
 	}
-	out, err := exec.Command("resolvectl", "domain", resolverIface).Output()
-	if err == nil && strings.Contains(string(out), "~"+domain) {
-		return true, "resolved sends " + domain + " to " + resolverIP + ":" + resolverPort
+	for _, tok := range linkDomains() {
+		if tok == "~"+domain {
+			return true, "resolved sends " + domain + " to " + resolverIP + ":" + resolverPort
+		}
 	}
 	return false, domain + " is not routed to the doze resolver"
 }
 
-func routeScript(domain string) string {
-	// Current domains plus this one, so the drop-in restates the whole set.
-	return fmt.Sprintf(`resolvectl domain %[1]s $(resolvectl domain %[1]s 2>/dev/null | sed 's/^.*: //') ~%[2]s
-mkdir -p %[3]s
-grep -q -- '~%[2]s' %[4]s 2>/dev/null || printf '[Service]\nExecStart=-/usr/bin/resolvectl domain %[1]s ~%[2]s\n' >> %[4]s`,
-		resolverIface, domain, shellQuote(strings.TrimSuffix(routesDropIn, "/domains.conf")), routesDropIn)
-}
-
-func unrouteScript(domain string) string {
-	return fmt.Sprintf(`sed -i '/~%[2]s$/d' %[1]s 2>/dev/null || true
-resolvectl domain %[3]s $(resolvectl domain %[3]s 2>/dev/null | sed 's/^.*: //' | sed 's/~%[2]s//') 2>/dev/null || true`,
-		routesDropIn, domain, resolverIface)
+// routesScript sets the link's domain list to the zone plus every route to
+// keep, now and at boot. The dropped routes are simply not in it.
+func routesScript(keep, _ []string) string {
+	toks := []string{"~" + Suffix}
+	for _, d := range keep {
+		toks = append(toks, "~"+d)
+	}
+	list := strings.Join(toks, " ")
+	unit := fmt.Sprintf("[Service]\nExecStart=-/usr/bin/resolvectl domain %s %s\n", resolverIface, list)
+	return strings.Join([]string{
+		fmt.Sprintf("resolvectl domain %s %s", resolverIface, list),
+		"mkdir -p " + shellQuote(strings.TrimSuffix(routesDropIn, "/domains.conf")),
+		"printf '%s' " + shellQuote(unit) + " > " + shellQuote(routesDropIn),
+		"systemctl daemon-reload 2>/dev/null || true",
+	}, "\n")
 }
 
 func caBundlePath() (path, update string) {
@@ -58,6 +76,10 @@ func caTrusted(ca *CA) (bool, string) {
 	return false, "not trusted · " + ca.RootPath()
 }
 
+// fingerprintTrusted: the bundle holds one doze root at a time (cp -f), so a
+// rotated-out root is gone with the rotation.
+func fingerprintTrusted(string) (bool, string) { return false, "" }
+
 func trustScript(ca *CA) string {
 	path, update := caBundlePath()
 	return fmt.Sprintf("cp -f %s %s\n%s", shellQuote(ca.RootPath()), shellQuote(path), update)
@@ -67,3 +89,5 @@ func untrustScript(ca *CA) string {
 	path, update := caBundlePath()
 	return fmt.Sprintf("rm -f %s\n%s", shellQuote(path), update)
 }
+
+func untrustFingerprintScript(string) string { return "true" }

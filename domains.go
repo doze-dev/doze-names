@@ -72,21 +72,27 @@ func Wildcard(host string) bool { return strings.HasPrefix(normalize(host), "*."
 func RouteDomain(host string) string { return strings.TrimPrefix(normalize(host), "*.") }
 
 // lookupDomain finds the domain entry that owns a host outside the doze
-// zone: the exact name, else a wildcard over it. A wildcard owns every
-// depth under it for resolving and routing; its certificate covers one
-// level, as certificates do.
-func lookupDomain(m map[string]Entry, host string) (Entry, bool) {
+// zone, and the registered name it was found under: the exact name, else
+// a wildcard over it. A wildcard owns the name under it too, so declaring
+// *.dev.acme.com alone serves dev.acme.com, which is what its certificate
+// carries and what doze url says. For resolving and routing a wildcard
+// owns every depth beneath it; its certificate covers one level, as
+// certificates do, so a.b.dev.acme.com resolves but fails the handshake.
+func lookupDomain(m map[string]Entry, host string) (Entry, string, bool) {
 	h := normalize(host)
 	if e, ok := m[h]; ok && e.Tier == TierDomain {
-		return e, true
+		return e, h, true
+	}
+	if e, ok := m["*."+h]; ok && e.Tier == TierDomain {
+		return e, "*." + h, true
 	}
 	for {
 		_, rest, found := strings.Cut(h, ".")
 		if !found || !strings.Contains(rest, ".") {
-			return Entry{}, false
+			return Entry{}, "", false
 		}
 		if e, ok := m["*."+rest]; ok && e.Tier == TierDomain {
-			return e, true
+			return e, "*." + rest, true
 		}
 		h = rest
 	}
@@ -101,7 +107,7 @@ func (r *Registry) IsDomain(host string) bool {
 	if InZone(host) {
 		return false
 	}
-	_, ok := lookupDomain(r.Snapshot(), host)
+	_, _, ok := lookupDomain(r.Snapshot(), host)
 	return ok
 }
 

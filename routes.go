@@ -21,18 +21,23 @@ type routes map[string][]string
 
 func routesPath(home string) string { return filepath.Join(home, routesFile) }
 
+// readRoutes reads the record. A key that is not a valid domain is
+// dropped: the file is the user's to edit, and its keys end up in a
+// privileged script, so only what ValidDomain allows gets through.
 func readRoutes(home string) routes {
 	out := routes{}
 	if b, err := os.ReadFile(routesPath(home)); err == nil {
 		_ = json.Unmarshal(b, &out)
 	}
+	for d := range out {
+		if ValidDomain(d) != nil || Wildcard(d) {
+			delete(out, d)
+		}
+	}
 	return out
 }
 
 func writeRoutes(home string, rs routes) error {
-	if err := os.MkdirAll(home, 0o755); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(rs, "", "  ")
 	if err != nil {
 		return err
@@ -40,40 +45,67 @@ func writeRoutes(home string, rs routes) error {
 	return writeFileAtomic(routesPath(home), append(b, '\n'), 0o644)
 }
 
+// updateRoutes runs fn on the record under a lock, as the registry does,
+// so two daemons starting together both land in it.
+func updateRoutes(home string, fn func(routes)) error {
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(routesPath(home)+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	unlock, err := lockFile(lock)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	rs := readRoutes(home)
+	fn(rs)
+	return writeRoutes(home, rs)
+}
+
+// routedCheck is domainRouted, replaceable in tests, which run with no
+// privilege and no routes.
+var routedCheck = func(domain string) bool { routed, _ := domainRouted(domain); return routed }
+
 // RecordDomains says what a project declares now, replacing what it said
 // before: a domain it dropped loses this project as a reason to be routed.
 func RecordDomains(home, dir string, domains []string) error {
-	rs := readRoutes(home)
 	want := map[string]bool{}
 	for _, d := range RouteDomains(domains) {
-		want[d] = true
-	}
-	for d, dirs := range rs {
-		rs[d] = without(dirs, dir)
-		if len(rs[d]) == 0 && !want[d] {
-			if routed, _ := domainRouted(d); routed {
-				// Kept with no claimant, so StaleRoutes reports it until the
-				// route is removed from the machine.
-				rs[d] = []string{}
-			} else {
-				delete(rs, d) // never routed, or already removed: nothing to remember
-			}
+		if ValidDomain(d) == nil {
+			want[d] = true
 		}
 	}
-	for d := range want {
-		rs[d] = append(without(rs[d], dir), dir)
-	}
-	return writeRoutes(home, rs)
+	return updateRoutes(home, func(rs routes) {
+		for d, dirs := range rs {
+			rs[d] = without(dirs, dir)
+			if len(rs[d]) == 0 && !want[d] {
+				if routedCheck(d) {
+					// Kept with no claimant, so StaleRoutes reports it until the
+					// route is removed from the machine.
+					rs[d] = []string{}
+				} else {
+					delete(rs, d) // never routed, or already removed: nothing to remember
+				}
+			}
+		}
+		for d := range want {
+			rs[d] = append(without(rs[d], dir), dir)
+		}
+	})
 }
 
 // ForgetProject drops a project from every route it declared: the folder
 // is gone, or doze trust --remove ran for it.
 func ForgetProject(home, dir string) error {
-	rs := readRoutes(home)
-	for d, dirs := range rs {
-		rs[d] = without(dirs, dir)
-	}
-	return writeRoutes(home, rs)
+	return updateRoutes(home, func(rs routes) {
+		for d, dirs := range rs {
+			rs[d] = without(dirs, dir)
+		}
+	})
 }
 
 // RecordedRoutes lists every domain this machine was asked to route, with
@@ -95,10 +127,8 @@ func StaleRoutes(home string) []string {
 	rs := readRoutes(home)
 	var out []string
 	for d, dirs := range rs {
-		if !declared(dirs) {
-			if routed, _ := domainRouted(d); routed {
-				out = append(out, d)
-			}
+		if !declared(dirs) && routedCheck(d) {
+			out = append(out, d)
 		}
 	}
 	sort.Strings(out)
@@ -107,12 +137,11 @@ func StaleRoutes(home string) []string {
 
 // RouteRemoved forgets a stale domain once its route is gone.
 func RouteRemoved(home, domain string) error {
-	rs := readRoutes(home)
-	if dirs, ok := rs[domain]; ok && !declared(dirs) {
-		delete(rs, domain)
-		return writeRoutes(home, rs)
-	}
-	return nil
+	return updateRoutes(home, func(rs routes) {
+		if dirs, ok := rs[domain]; ok && !declared(dirs) {
+			delete(rs, domain)
+		}
+	})
 }
 
 // declared says one of the folders still has a doze.hcl: a claimant that

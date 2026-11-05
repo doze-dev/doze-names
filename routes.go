@@ -51,9 +51,13 @@ func RecordDomains(home, dir string, domains []string) error {
 	for d, dirs := range rs {
 		rs[d] = without(dirs, dir)
 		if len(rs[d]) == 0 && !want[d] {
-			// Kept with no claimant, so StaleRoutes can report it; Forget
-			// removes it once the route is gone from the machine.
-			rs[d] = []string{}
+			if routed, _ := domainRouted(d); routed {
+				// Kept with no claimant, so StaleRoutes reports it until the
+				// route is removed from the machine.
+				rs[d] = []string{}
+			} else {
+				delete(rs, d) // never routed, or already removed: nothing to remember
+			}
 		}
 	}
 	for d := range want {

@@ -117,10 +117,13 @@ func resolvConfServers(path string) []string {
 	return servers
 }
 
+// upstreamAddrs is where forward sends; tests point it at a server of theirs.
+var upstreamAddrs = func() []string { return upstream.find() }
+
 // forward sends the query to the first upstream that answers and returns
 // its reply, or nil when none did in time.
 func forward(q []byte) []byte {
-	for _, addr := range upstream.find() {
+	for _, addr := range upstreamAddrs() {
 		conn, err := net.DialTimeout("udp", addr, upstreamTimeout)
 		if err != nil {
 			continue

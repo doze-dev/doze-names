@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -355,4 +356,84 @@ func waitFor(t *testing.T, ok func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting")
+}
+
+func TestAnUnservedDomainIsForwardedUpstreamAndTheZoneNeverIs(t *testing.T) {
+	// A fake upstream that answers every A question with 203.0.113.9.
+	up, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer up.Close()
+	var asked []string
+	var mu sync.Mutex
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, addr, err := up.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			name, _, _, _ := parseQuestion(buf[:n], 12)
+			mu.Lock()
+			asked = append(asked, name)
+			mu.Unlock()
+			resp, _ := answer(buf[:n], func(string) net.IP { return net.IPv4(203, 0, 113, 9) })
+			_, _ = up.WriteToUDP(resp, addr)
+		}
+	}()
+	old := upstreamAddrs
+	upstreamAddrs = func() []string { return []string{up.LocalAddr().String()} }
+	t.Cleanup(func() { upstreamAddrs = old })
+
+	r := Open(t.TempDir(), "doze")
+	web, _ := r.Claim(Qualified("web", "shop"))
+	t.Cleanup(func() { _ = web.Release() })
+	if _, err := web.Twin(DomainName("dev.acme.com")); err != nil {
+		t.Fatal(err)
+	}
+	addr := freeAddr(t, "udp4")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := ServeAt(ctx, r, addr, t.Logf)
+	defer srv.Close()
+	if !srv.Bound(ctx) {
+		t.Fatal("resolver never bound")
+	}
+	ask := func(name string) (net.IP, uint16) {
+		c, err := net.Dial("udp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		_, _ = c.Write(query(name, typeA))
+		buf := make([]byte, 1024)
+		n, err := c.Read(buf)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		resp := buf[:n]
+		if ancountOf(resp) == 0 {
+			return nil, rcodeOf(resp)
+		}
+		return net.IPv4(resp[n-4], resp[n-3], resp[n-2], resp[n-1]), rcodeOf(resp)
+	}
+	// A declared domain is answered here; the upstream is not asked.
+	if ip, _ := ask("dev.acme.com"); ip == nil || !ip.Equal(web.IP) {
+		t.Errorf("dev.acme.com = %v, want the app's %v", ip, web.IP)
+	}
+	// A domain nobody declares (the stack went down) comes from upstream.
+	if ip, _ := ask("dev.other.com"); ip == nil || !ip.Equal(net.IPv4(203, 0, 113, 9)) {
+		t.Errorf("dev.other.com = %v, want the upstream's answer", ip)
+	}
+	// The zone is never forwarded: a typo is NXDOMAIN here.
+	if _, rcode := ask("nope.shop.doze"); rcode != 3 {
+		t.Errorf("nope.shop.doze rcode = %d, want NXDOMAIN", rcode)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 1 || asked[0] != "dev.other.com" {
+		t.Errorf("upstream was asked %v, want only dev.other.com", asked)
+	}
 }

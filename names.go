@@ -164,6 +164,8 @@ func ResolverAddr() string {
 const (
 	EnvResolver = "DOZE_ZONE_RESOLVER" // host:port for the DNS server, e.g. 127.0.0.1:15323
 	EnvIngress  = "DOZE_ZONE_INGRESS"  // host:port for the HTTP front door, e.g. 127.0.0.1:18080
+	// EnvIngressTLS moves the https front door the same way, e.g. 127.0.0.1:18443.
+	EnvIngressTLS = "DOZE_ZONE_INGRESS_TLS"
 )
 
 // EnvHome overrides the shared doze home, matching doze core's variable.

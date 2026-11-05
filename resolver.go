@@ -181,7 +181,21 @@ func serveConn(ctx context.Context, conn *net.UDPConn, resolve Resolve) {
 		if err != nil {
 			return
 		}
-		if resp := answer(buf[:n], resolve); resp != nil {
+		resp, fwd := answer(buf[:n], resolve)
+		if fwd {
+			// A domain routed here whose stack is down: the internet's answer,
+			// relayed, so the name means what it means when doze is not claiming it.
+			q := append([]byte(nil), buf[:n]...)
+			go func() {
+				if r := forward(q); r != nil {
+					_, _ = conn.WriteToUDP(r, addr)
+				} else if resp != nil {
+					_, _ = conn.WriteToUDP(resp, addr)
+				}
+			}()
+			continue
+		}
+		if resp != nil {
 			_, _ = conn.WriteToUDP(resp, addr)
 		}
 	}
@@ -192,31 +206,35 @@ const (
 	typeAAAA = 28
 )
 
-// answer builds the response to one query: an A record for an in-zone name
-// this machine serves, an empty NOERROR for in-zone non-A questions (so the
-// client falls back to the A answer rather than retrying), and NXDOMAIN for
-// anything else. Nil for input that cannot be parsed.
-func answer(q []byte, resolve Resolve) []byte {
+// answer builds the response to one query: an A record for a name this
+// machine serves (in the zone, or a declared domain), an empty NOERROR for
+// a served name's non-A questions (so the client falls back to the A answer
+// rather than retrying), and NXDOMAIN for anything else in the zone. For a
+// name outside the zone that nobody serves, forward is true and the
+// NXDOMAIN is only what to say if the upstreams do not answer. Nil for
+// input that cannot be parsed.
+func answer(q []byte, resolve Resolve) (resp []byte, forward bool) {
 	if len(q) < 12 {
-		return nil
+		return nil, false
 	}
 	if binary.BigEndian.Uint16(q[4:6]) != 1 {
-		return nil // one question per query, like every real client sends
+		return nil, false // one question per query, like every real client sends
 	}
 	name, qtype, qend, ok := parseQuestion(q, 12)
 	if !ok {
-		return nil
+		return nil, false
 	}
 
 	var ip net.IP
-	inZone := InZone(name)
-	if inZone && resolve != nil {
+	if resolve != nil {
 		if r := resolve(name); r != nil {
 			ip = r.To4()
 		}
 	}
+	inZone := ip != nil || InZone(name)
+	forward = ip == nil && !InZone(name)
 
-	resp := make([]byte, 0, qend+16)
+	resp = make([]byte, 0, qend+16)
 	resp = append(resp, q[0], q[1])
 	flags := uint16(0x8080) | (binary.BigEndian.Uint16(q[2:4]) & 0x0100) // QR|RA, echo RD
 	var rcode, answers uint16
@@ -244,7 +262,7 @@ func answer(q []byte, resolve Resolve) []byte {
 		resp = binary.BigEndian.AppendUint16(resp, 4)
 		resp = append(resp, ip[0], ip[1], ip[2], ip[3])
 	}
-	return resp
+	return resp, forward
 }
 
 // parseQuestion reads one question, returning the lowercase dotted name and

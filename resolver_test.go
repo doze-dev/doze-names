@@ -57,7 +57,7 @@ func TestAnswer(t *testing.T) {
 	resolve := staticResolve(map[string]string{"aws.doze": "127.0.0.2"})
 
 	t.Run("A record for a name we serve", func(t *testing.T) {
-		resp := answer(query("aws.doze", typeA), resolve)
+		resp, _ := answer(query("aws.doze", typeA), resolve)
 		if resp == nil {
 			t.Fatal("no response")
 		}
@@ -76,26 +76,26 @@ func TestAnswer(t *testing.T) {
 	t.Run("AAAA is an empty NOERROR, not NXDOMAIN", func(t *testing.T) {
 		// A client that gets NXDOMAIN for AAAA may not fall back to the A
 		// record; an empty NOERROR tells it the name exists with no v6 address.
-		resp := answer(query("aws.doze", typeAAAA), resolve)
+		resp, _ := answer(query("aws.doze", typeAAAA), resolve)
 		if rcodeOf(resp) != 0 || ancountOf(resp) != 0 {
 			t.Fatalf("rcode=%d ancount=%d, want 0/0", rcodeOf(resp), ancountOf(resp))
 		}
 	})
 
 	t.Run("in-zone but unregistered is NXDOMAIN", func(t *testing.T) {
-		if got := rcodeOf(answer(query("nope.doze", typeA), resolve)); got != 3 {
+		if got := rcodeOf(first(answer(query("nope.doze", typeA), resolve))); got != 3 {
 			t.Errorf("rcode = %d, want 3", got)
 		}
 	})
 
-	t.Run("out of zone is NXDOMAIN", func(t *testing.T) {
-		if got := rcodeOf(answer(query("example.com", typeA), resolve)); got != 3 {
-			t.Errorf("rcode = %d, want 3", got)
+	t.Run("out of zone is forwarded, NXDOMAIN if nobody answers", func(t *testing.T) {
+		if resp, fwd := answer(query("example.com", typeA), resolve); !fwd || rcodeOf(resp) != 3 {
+			t.Errorf("fwd = %v, rcode = %d; want forwarded with 3", fwd, rcodeOf(resp))
 		}
 	})
 
 	t.Run("truncated input is dropped, not answered", func(t *testing.T) {
-		if resp := answer([]byte{1, 2, 3}, resolve); resp != nil {
+		if resp, _ := answer([]byte{1, 2, 3}, resolve); resp != nil {
 			t.Error("answered a malformed query")
 		}
 	})
@@ -118,7 +118,7 @@ func TestAnswer(t *testing.T) {
 			t.Fatalf("name parked at %d, pointer says %d", len(compressed), target)
 		}
 		compressed = append(compressed, base[nameStart:]...)
-		if resp := answer(compressed, resolve); resp == nil || ancountOf(resp) != 1 {
+		if resp, _ := answer(compressed, resolve); resp == nil || ancountOf(resp) != 1 {
 			t.Fatal("a compressed QNAME was not answered")
 		}
 	})
@@ -239,3 +239,5 @@ func waitCtx(t *testing.T) context.Context {
 	t.Cleanup(cancel)
 	return ctx
 }
+
+func first(resp []byte, _ bool) []byte { return resp }

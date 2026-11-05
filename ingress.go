@@ -18,6 +18,7 @@ package names
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -40,7 +41,17 @@ const IngressAddr = ":80"
 const (
 	ingressNetwork = "tcp4"
 	ingressBind    = "0.0.0.0:80"
+	ingressTLSBind = "0.0.0.0:443"
 )
+
+// IngressTLSBind is the https front door's address: the wildcard on 443,
+// unless EnvIngressTLS moves it.
+func IngressTLSBind() string {
+	if a := strings.TrimSpace(os.Getenv(EnvIngressTLS)); a != "" {
+		return a
+	}
+	return ingressTLSBind
+}
 
 // IngressBind is the address the front door listens on: the wildcard on port
 // 80, unless EnvIngress moves it.
@@ -57,6 +68,9 @@ func IngressBind() string {
 // registry rather than in a file of its own means the pid sweep frees it for
 // free when a holder dies.
 const ingressKey = "_ingress"
+
+// ingressTLSKey records which process holds the https front door.
+const ingressTLSKey = "_ingress_tls"
 
 // resolverKey records which process holds the DNS socket, for the same reason
 // ingressKey does: "address in use" says nothing about WHO, and telling a user
@@ -88,17 +102,23 @@ func (r *Registry) ResolverHolder() (Entry, bool) {
 }
 
 // claimIngress records this process as the front door.
-func (r *Registry) claimIngress(addr string) {
+func (r *Registry) claimIngress(addr string) { r.claimPort(ingressKey, addr) }
+
+// claimPort records this process as the holder of a front door port, under
+// its key (ingressKey, ingressTLSKey).
+func (r *Registry) claimPort(key, addr string) {
 	_ = r.update(func(m map[string]Entry) error {
-		m[ingressKey] = Entry{PID: r.pid, Owner: r.owner, Target: addr}
+		m[key] = Entry{PID: r.pid, Owner: r.owner, Target: addr}
 		return nil
 	})
 }
 
-func (r *Registry) releaseIngress() {
+func (r *Registry) releaseIngress() { r.releasePort(ingressKey) }
+
+func (r *Registry) releasePort(key string) {
 	_ = r.update(func(m map[string]Entry) error {
-		if e, ok := m[ingressKey]; ok && e.PID == r.pid {
-			delete(m, ingressKey)
+		if e, ok := m[key]; ok && e.PID == r.pid {
+			delete(m, key)
 		}
 		return nil
 	})
@@ -108,8 +128,13 @@ func (r *Registry) releaseIngress() {
 // answers a question a TCP dial cannot: whether the program on :80 is ours.
 // Anything else there will answer requests for doze names with its own site,
 // which looks like doze serving the wrong thing.
-func (r *Registry) IngressHolder() (Entry, bool) {
-	e, ok := r.Snapshot()[ingressKey]
+func (r *Registry) IngressHolder() (Entry, bool) { return r.portHolder(ingressKey) }
+
+// IngressTLSHolder says which process holds the https port, if any does.
+func (r *Registry) IngressTLSHolder() (Entry, bool) { return r.portHolder(ingressTLSKey) }
+
+func (r *Registry) portHolder(key string) (Entry, bool) {
+	e, ok := r.Snapshot()[key]
 	return e, ok
 }
 
@@ -165,9 +190,10 @@ func (r *Registry) routeFor(host string) string {
 
 // Ingress is the shared front door for as long as this process holds it.
 type Ingress struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	bound  chan struct{}
+	cancel  context.CancelFunc
+	done    chan struct{}
+	tlsDone chan struct{} // nil without https
+	bound   chan struct{}
 }
 
 // ServeIngress fronts every peer's routed names on the shared port, taking it
@@ -175,67 +201,117 @@ type Ingress struct {
 // standing by is the normal case for all but one process, and the names work
 // either way because whoever holds the port reads the same registry.
 func ServeIngress(ctx context.Context, r *Registry, logf func(string, ...any)) *Ingress {
+	return serveFront(ctx, r, nil, logf)
+}
+
+// ServeFrontDoor is ServeIngress with https too: a second listener on the
+// TLS port serves every declared domain (domains.go) with a certificate
+// minted from ca, and plain requests for a domain are sent to https. Both
+// ports follow the same first-come rule, each on its own.
+func ServeFrontDoor(ctx context.Context, r *Registry, ca *CA, logf func(string, ...any)) *Ingress {
+	return serveFront(ctx, r, ca, logf)
+}
+
+func serveFront(ctx context.Context, r *Registry, ca *CA, logf func(string, ...any)) *Ingress {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	in := &Ingress{cancel: cancel, done: make(chan struct{}), bound: make(chan struct{})}
-
+	plain := &http.Server{Handler: withHTTPSRedirect(r, ca != nil, proxy(r))}
 	go func() {
 		defer close(in.done)
-		var announced bool
-		for {
-			bind := IngressBind()
-			ln, err := net.Listen(ingressNetwork, bind)
-			switch {
-			case err == nil:
-				r.claimIngress(bind)
+		holdPort(ctx, r, IngressBind(), ingressKey, plain, in.bound, logf)
+	}()
+	if ca != nil {
+		tlsSrv := &http.Server{Handler: proxy(r), TLSConfig: &tls.Config{
+			GetCertificate: r.GetCertificate(ca),
+			MinVersion:     tls.VersionTLS12,
+			NextProtos:     []string{"h2", "http/1.1"},
+		}}
+		in.tlsDone = make(chan struct{})
+		go func() {
+			defer close(in.tlsDone)
+			holdPort(ctx, r, IngressTLSBind(), ingressTLSKey, tlsSrv, nil, logf)
+		}()
+	}
+	return in
+}
+
+// holdPort takes a port when it is free and serves on it until ctx ends,
+// standing by and trying again when a peer or someone else has it.
+func holdPort(ctx context.Context, r *Registry, bind, key string, srv *http.Server, bound chan struct{}, logf func(string, ...any)) {
+	var announced bool
+	for {
+		ln, err := net.Listen(ingressNetwork, bind)
+		switch {
+		case err == nil:
+			r.claimPort(key, bind)
+			if bound != nil {
 				select {
-				case <-in.bound:
+				case <-bound:
 				default:
-					close(in.bound)
-				}
-				logf("names: fronting %s on %s", Suffix, bind)
-				announced = false
-				srv := &http.Server{Handler: proxy(r)}
-				go func() { <-ctx.Done(); _ = srv.Close() }()
-				_ = srv.Serve(ln)
-				r.releaseIngress()
-				if ctx.Err() != nil {
-					return
-				}
-			case isAddrInUse(err):
-				if !announced {
-					if h, ok := r.IngressHolder(); ok {
-						logf("names: %s is fronting %s (pid %d); standing by", h.Owner, Suffix, h.PID)
-					} else {
-						// Nothing of ours holds the port, so something else
-						// does — and DNS still sends browsers to it, where it
-						// will answer for doze names with its own content.
-						// That reads as doze serving the wrong thing, so say
-						// plainly what happened.
-						logf("names: something other than doze holds %s, so %s names cannot be "+
-							"port-less — they still work with their port. Stop it, or use the "+
-							"port-ful URL below", bind, Suffix)
-					}
-					announced = true
-				}
-			default:
-				if !announced {
-					// On Linux this is the sysctl not being applied. Say so
-					// rather than leaving a bare EACCES.
-					logf("names: cannot bind %s (%v); names will need their port", bind, err)
-					announced = true
+					close(bound)
 				}
 			}
-			select {
-			case <-ctx.Done():
+			logf("names: fronting %s on %s", Suffix, bind)
+			announced = false
+			go func() { <-ctx.Done(); _ = srv.Close() }()
+			if srv.TLSConfig != nil {
+				_ = srv.ServeTLS(ln, "", "")
+			} else {
+				_ = srv.Serve(ln)
+			}
+			r.releasePort(key)
+			if ctx.Err() != nil {
 				return
-			case <-time.After(retryInterval):
+			}
+		case isAddrInUse(err):
+			if !announced {
+				if h, ok := r.portHolder(key); ok {
+					logf("names: %s is fronting %s (pid %d); standing by", h.Owner, bind, h.PID)
+				} else {
+					// Nothing of ours holds the port, so something else
+					// does — and DNS still sends browsers to it, where it
+					// will answer for doze names with its own content.
+					// That reads as doze serving the wrong thing, so say
+					// plainly what happened.
+					logf("names: something other than doze holds %s, so %s names cannot be "+
+						"port-less there — they still work with their port. Stop it, or use the "+
+						"port-ful URL below", bind, Suffix)
+				}
+				announced = true
+			}
+		default:
+			if !announced {
+				// On Linux this is the sysctl not being applied. Say so
+				// rather than leaving a bare EACCES.
+				logf("names: cannot bind %s (%v); names will need their port", bind, err)
+				announced = true
 			}
 		}
-	}()
-	return in
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryInterval):
+		}
+	}
+}
+
+// withHTTPSRedirect sends a plain request for a declared domain to https,
+// since a site with sign-in wants one origin; doze names stay plain.
+func withHTTPSRedirect(r *Registry, on bool, next http.Handler) http.Handler {
+	if !on {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.TLS == nil && r.IsDomain(req.Host) {
+			u := "https://" + hostOnly(req.Host) + req.URL.RequestURI()
+			http.Redirect(w, req, u, http.StatusTemporaryRedirect)
+			return
+		}
+		next.ServeHTTP(w, req)
+	})
 }
 
 // Bound blocks until this process holds the port, or ctx ends.
@@ -255,6 +331,9 @@ func (in *Ingress) Close() {
 	}
 	in.cancel()
 	<-in.done
+	if in.tlsDone != nil {
+		<-in.tlsDone
+	}
 }
 
 // proxy routes by Host header to whichever peer registered that name.

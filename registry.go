@@ -59,6 +59,10 @@ type Entry struct {
 	// Empty means the name resolves but is not fronted, which is right for a
 	// service that is not HTTP.
 	Target string `json:"target,omitempty"`
+	// Cert and Key are the files of a certificate the person brought for a
+	// domain, served in place of one minted from the doze CA.
+	Cert string `json:"cert,omitempty"`
+	Key  string `json:"key,omitempty"`
 	// Ports is set where a name's address is translated and not bound (macOS):
 	// each public port, and the private port on the gateway it is served on.
 	// See Lease.Listen.
@@ -253,11 +257,12 @@ func (r *Registry) Resolve(host string) net.IP {
 // exist rather than as a connection to the wrong thing", which is the property
 // that makes a wrong name debuggable.
 func (r *Registry) lookup(host string) (Entry, bool) {
+	m := r.Snapshot()
 	if !InZone(host) {
-		return Entry{}, false
+		// Outside the zone only a domain an app declared answers (domains.go).
+		return lookupDomain(m, host)
 	}
 	h := normalize(host)
-	m := r.Snapshot()
 	for h != Suffix {
 		if e, ok := m[h]; ok {
 			return e, true

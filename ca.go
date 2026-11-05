@@ -15,7 +15,9 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -374,4 +376,57 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 func OpenCA(dir string) (*CA, bool) {
 	c, ok, err := openCA(dir)
 	return c, ok && err == nil
+}
+
+// bundleName is the file clients that replace their trust store are
+// pointed at: the system's roots and the doze root together.
+const bundleName = "bundle.pem"
+
+// Bundle writes <dir>/bundle.pem: the machine's trusted roots, whatever a
+// SSL_CERT_FILE already in extraPEM holds, and the doze root, and returns
+// its path. SSL_CERT_FILE and REQUESTS_CA_BUNDLE replace a client's store
+// rather than add to it, so pointing them at the root alone would cut the
+// stack off from every public https host; this keeps them whole.
+func (c *CA) Bundle(extraPEM []byte) (string, error) {
+	var b []byte
+	b = append(b, systemRootsPEM()...)
+	if len(extraPEM) > 0 {
+		b = append(b, '\n')
+		b = append(b, extraPEM...)
+	}
+	root, err := os.ReadFile(c.RootPath())
+	if err != nil {
+		return "", err
+	}
+	b = append(b, '\n')
+	b = append(b, root...)
+	path := filepath.Join(c.dir, bundleName)
+	if err := writeFileAtomic(path, b, 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// BundlePath is where Bundle writes.
+func (c *CA) BundlePath() string { return filepath.Join(c.dir, bundleName) }
+
+// systemRootsPEM is the machine's trusted roots as PEM: the system and
+// admin keychains on macOS, the distribution's bundle on Linux.
+func systemRootsPEM() []byte {
+	if runtime.GOOS == "darwin" {
+		var out []byte
+		for _, kc := range []string{"/System/Library/Keychains/SystemRootCertificates.keychain", "/Library/Keychains/System.keychain"} {
+			if b, err := exec.Command("security", "find-certificate", "-a", "-p", kc).Output(); err == nil {
+				out = append(out, b...)
+				out = append(out, '\n')
+			}
+		}
+		return out
+	}
+	for _, p := range []string{"/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/ca-bundle.pem", "/etc/ssl/cert.pem"} {
+		if b, err := os.ReadFile(p); err == nil {
+			return b
+		}
+	}
+	return nil
 }

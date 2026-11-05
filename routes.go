@@ -164,3 +164,28 @@ func without(dirs []string, dir string) []string {
 	}
 	return out
 }
+
+// AnyDeclared says some project with a doze.hcl still declares a domain:
+// the authority stays trusted while one does.
+func AnyDeclared(home string) bool {
+	for _, dirs := range readRoutes(home) {
+		if declared(dirs) {
+			return true
+		}
+	}
+	return false
+}
+
+// RemoveCA deletes the authority's files; its trust is removed by Untrust.
+func RemoveCA(home string) error { return os.RemoveAll(CADir(home)) }
+
+// Claimants are the projects with a doze.hcl that still declare a route.
+func Claimants(home, route string) []string {
+	var out []string
+	for _, dir := range readRoutes(home)[route] {
+		if declared([]string{dir}) {
+			out = append(out, dir)
+		}
+	}
+	return out
+}

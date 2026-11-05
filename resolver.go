@@ -193,7 +193,7 @@ func serveConn(ctx context.Context, conn *net.UDPConn, resolve Resolve) {
 			q := append([]byte(nil), buf[:n]...)
 			go func() {
 				if r := forward(q); r != nil {
-					_, _ = conn.WriteToUDP(r, addr)
+					_, _ = conn.WriteToUDP(capTTL(r, relayTTL), addr)
 				} else if resp != nil {
 					_, _ = conn.WriteToUDP(resp, addr)
 				}

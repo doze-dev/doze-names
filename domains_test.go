@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -295,7 +296,7 @@ func TestTheFrontDoorServesADomainOverTLSAndRedirectsPlainRequests(t *testing.T)
 	t.Setenv(EnvIngressTLS, tlsAddr)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	front := ServeFrontDoor(ctx, reg, ca, t.Logf)
+	front := ServeFrontDoor(ctx, reg, ca.dir, t.Logf)
 	defer front.Close()
 	if !front.Bound(ctx) {
 		t.Fatal("the plain port was never bound")
@@ -379,6 +380,10 @@ func TestAnUnservedDomainIsForwardedUpstreamAndTheZoneNeverIs(t *testing.T) {
 			asked = append(asked, name)
 			mu.Unlock()
 			resp, _ := answer(buf[:n], func(string) net.IP { return net.IPv4(203, 0, 113, 9) })
+			// The real host's answer is cached for an hour; doze must not let it be.
+			if len(resp) >= 10 {
+				binary.BigEndian.PutUint32(resp[len(resp)-10:], 3600)
+			}
 			_, _ = up.WriteToUDP(resp, addr)
 		}
 	}()
@@ -400,6 +405,7 @@ func TestAnUnservedDomainIsForwardedUpstreamAndTheZoneNeverIs(t *testing.T) {
 	if !srv.Bound(ctx) {
 		t.Fatal("resolver never bound")
 	}
+	var lastTTL uint32
 	ask := func(name string) (net.IP, uint16) {
 		c, err := net.Dial("udp", addr)
 		if err != nil {
@@ -417,6 +423,7 @@ func TestAnUnservedDomainIsForwardedUpstreamAndTheZoneNeverIs(t *testing.T) {
 		if ancountOf(resp) == 0 {
 			return nil, rcodeOf(resp)
 		}
+		lastTTL = binary.BigEndian.Uint32(resp[n-10:])
 		return net.IPv4(resp[n-4], resp[n-3], resp[n-2], resp[n-1]), rcodeOf(resp)
 	}
 	// A declared domain is answered here; the upstream is not asked.
@@ -426,6 +433,9 @@ func TestAnUnservedDomainIsForwardedUpstreamAndTheZoneNeverIs(t *testing.T) {
 	// A domain nobody declares (the stack went down) comes from upstream.
 	if ip, _ := ask("dev.other.com"); ip == nil || !ip.Equal(net.IPv4(203, 0, 113, 9)) {
 		t.Errorf("dev.other.com = %v, want the upstream's answer", ip)
+	}
+	if lastTTL != relayTTL {
+		t.Errorf("relayed TTL = %d, want it capped at %d so a stack claiming the domain is seen at once", lastTTL, relayTTL)
 	}
 	// The zone is never forwarded: a typo is NXDOMAIN here.
 	if _, rcode := ask("nope.shop.doze"); rcode != 3 {

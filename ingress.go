@@ -192,49 +192,49 @@ func (r *Registry) routeFor(host string) string {
 type Ingress struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
-	tlsDone chan struct{} // nil without https
+	tlsDone chan struct{}
 	bound   chan struct{}
 }
 
-// ServeIngress fronts every peer's routed names on the shared port, taking it
-// if free and waiting for it if a peer holds it. Like Serve, it never fails:
-// standing by is the normal case for all but one process, and the names work
-// either way because whoever holds the port reads the same registry.
+// ServeIngress fronts every peer's routed names on the shared ports, taking
+// each if free and waiting for it if a peer holds it. Like Serve, it never
+// fails: standing by is the normal case for all but one process, and the
+// names work either way because whoever holds a port reads the same
+// registry. The https port is served too, for every declared domain
+// (domains.go): with the certificate the person brought, or one minted
+// from the machine's authority as it is on disk now, so the holder need
+// not be the stack that declared the domain, nor have started after the
+// authority was made or rotated.
 func ServeIngress(ctx context.Context, r *Registry, logf func(string, ...any)) *Ingress {
-	return serveFront(ctx, r, nil, logf)
+	return ServeFrontDoor(ctx, r, CADir(Home()), logf)
 }
 
-// ServeFrontDoor is ServeIngress with https too: a second listener on the
-// TLS port serves every declared domain (domains.go) with a certificate
-// minted from ca, and plain requests for a domain are sent to https. Both
-// ports follow the same first-come rule, each on its own.
-func ServeFrontDoor(ctx context.Context, r *Registry, ca *CA, logf func(string, ...any)) *Ingress {
-	return serveFront(ctx, r, ca, logf)
+// ServeFrontDoor is ServeIngress with the authority taken from caDir.
+func ServeFrontDoor(ctx context.Context, r *Registry, caDir string, logf func(string, ...any)) *Ingress {
+	source := func() *CA { c, _ := CurrentCA(caDir); return c }
+	return serveFront(ctx, r, source, logf)
 }
 
-func serveFront(ctx context.Context, r *Registry, ca *CA, logf func(string, ...any)) *Ingress {
+func serveFront(ctx context.Context, r *Registry, source func() *CA, logf func(string, ...any)) *Ingress {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	in := &Ingress{cancel: cancel, done: make(chan struct{}), bound: make(chan struct{})}
-	plain := &http.Server{Handler: withHTTPSRedirect(r, ca != nil, proxy(r))}
+	in := &Ingress{cancel: cancel, done: make(chan struct{}), bound: make(chan struct{}), tlsDone: make(chan struct{})}
+	plain := &http.Server{Handler: withHTTPSRedirect(r, proxy(r))}
 	go func() {
 		defer close(in.done)
 		holdPort(ctx, r, IngressBind(), ingressKey, plain, in.bound, logf)
 	}()
-	if ca != nil {
-		tlsSrv := &http.Server{Handler: proxy(r), TLSConfig: &tls.Config{
-			GetCertificate: r.GetCertificate(ca),
-			MinVersion:     tls.VersionTLS12,
-			NextProtos:     []string{"h2", "http/1.1"},
-		}}
-		in.tlsDone = make(chan struct{})
-		go func() {
-			defer close(in.tlsDone)
-			holdPort(ctx, r, IngressTLSBind(), ingressTLSKey, tlsSrv, nil, logf)
-		}()
-	}
+	tlsSrv := &http.Server{Handler: proxy(r), TLSConfig: &tls.Config{
+		GetCertificate: r.getCertificate(source),
+		MinVersion:     tls.VersionTLS12,
+		NextProtos:     []string{"h2", "http/1.1"},
+	}}
+	go func() {
+		defer close(in.tlsDone)
+		holdPort(ctx, r, IngressTLSBind(), ingressTLSKey, tlsSrv, nil, logf)
+	}()
 	return in
 }
 
@@ -299,11 +299,11 @@ func holdPort(ctx context.Context, r *Registry, bind, key string, srv *http.Serv
 }
 
 // withHTTPSRedirect sends a plain request for a declared domain to https,
-// since a site with sign-in wants one origin; doze names stay plain.
-func withHTTPSRedirect(r *Registry, on bool, next http.Handler) http.Handler {
-	if !on {
-		return next
-	}
+// since a site with sign-in wants one origin; doze names stay plain. Only
+// while a doze process holds the https port: sent to a port something else
+// holds, the browser would see that program's site under the domain. One
+// registry read decides both.
+func withHTTPSRedirect(r *Registry, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		// The peer check comes first, as on the plain door: a refused peer
 		// learns nothing, not even which names are domains.
@@ -311,10 +311,16 @@ func withHTTPSRedirect(r *Registry, on bool, next http.Handler) http.Handler {
 			next.ServeHTTP(w, req)
 			return
 		}
-		if req.TLS == nil && r.IsDomain(req.Host) {
-			u := "https://" + hostOnly(req.Host) + req.URL.RequestURI()
-			http.Redirect(w, req, u, http.StatusTemporaryRedirect)
-			return
+		if req.TLS == nil {
+			host := normalize(hostOnly(req.Host))
+			if !InZone(host) && ValidDomain(host) == nil {
+				m := r.Snapshot()
+				_, held := m[ingressTLSKey]
+				if _, _, ok := lookupDomain(m, host); ok && held {
+					http.Redirect(w, req, "https://"+host+req.URL.RequestURI(), http.StatusTemporaryRedirect)
+					return
+				}
+			}
 		}
 		next.ServeHTTP(w, req)
 	})

@@ -2,6 +2,7 @@ package names
 
 import (
 	"bufio"
+	"encoding/binary"
 	"net"
 	"os"
 	"os/exec"
@@ -145,4 +146,65 @@ func forward(q []byte) []byte {
 		}
 	}
 	return nil
+}
+
+// relayTTL caps what a relayed answer may be cached for. The upstream's
+// own TTL can be an hour; the moment a stack claims the domain the answer
+// must change, and a stub resolver holding the real address that long
+// would keep sending the browser to the internet.
+const relayTTL = 10
+
+// capTTL rewrites every resource record's TTL in a DNS message to at most
+// max, leaving everything else as it was. A message it cannot walk is
+// returned untouched.
+func capTTL(msg []byte, max uint32) []byte {
+	if len(msg) < 12 {
+		return msg
+	}
+	qd := int(binary.BigEndian.Uint16(msg[4:6]))
+	rrs := int(binary.BigEndian.Uint16(msg[6:8])) + int(binary.BigEndian.Uint16(msg[8:10])) + int(binary.BigEndian.Uint16(msg[10:12]))
+	off := 12
+	for i := 0; i < qd; i++ {
+		n, ok := skipName(msg, off)
+		if !ok || n+4 > len(msg) {
+			return msg
+		}
+		off = n + 4
+	}
+	out := append([]byte(nil), msg...)
+	for i := 0; i < rrs; i++ {
+		n, ok := skipName(msg, off)
+		if !ok || n+10 > len(msg) {
+			return msg
+		}
+		ttlAt := n + 4
+		if binary.BigEndian.Uint32(msg[ttlAt:ttlAt+4]) > max {
+			binary.BigEndian.PutUint32(out[ttlAt:ttlAt+4], max)
+		}
+		rdlen := int(binary.BigEndian.Uint16(msg[n+8 : n+10]))
+		off = n + 10 + rdlen
+		if off > len(msg) {
+			return msg
+		}
+	}
+	return out
+}
+
+// skipName steps over a name at off, compressed or not, and returns the
+// offset after it.
+func skipName(msg []byte, off int) (int, bool) {
+	for {
+		if off >= len(msg) {
+			return 0, false
+		}
+		l := int(msg[off])
+		switch {
+		case l == 0:
+			return off + 1, true
+		case l&0xC0 == 0xC0:
+			return off + 2, off+2 <= len(msg)
+		default:
+			off += 1 + l
+		}
+	}
 }

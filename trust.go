@@ -14,10 +14,11 @@ import (
 // machine that declared no domain, and the CA is trusted only when a domain
 // asked for https.
 //
-// The routes are written as a whole: on Linux the link's domain list is one
-// setting, so every change restates every route that should exist; on
-// macOS each route is a file, and the same whole-set view says which to
-// write and which to remove.
+// The prompt says what the script does, and the script does only that: on
+// macOS the files written are the request's own domains, and the files
+// removed are the stale ones; on Linux the link's domain list is one
+// setting, so every change restates every route that should exist, and the
+// prompt says so.
 
 // TrustRequest is what to set up.
 type TrustRequest struct {
@@ -32,6 +33,10 @@ type TrustRequest struct {
 	// Home is where the routes record lives: the whole set of routes the
 	// machine should keep is read from it, and it is updated after a run.
 	Home string
+	// UntrustAll, for Untrust, removes every doze authority the machine
+	// trusts, named or not: the last project is leaving, and a root whose
+	// files are gone must not stay trusted.
+	UntrustAll bool
 }
 
 // routeSet is every route the machine should keep after a run: the
@@ -71,8 +76,8 @@ func TrustStatus(req TrustRequest) []Step {
 		done, detail := caTrusted(req.CA)
 		steps = append(steps, Step{Name: "certificate authority", Done: done, Detail: detail})
 		for _, fp := range req.CA.previous {
-			if trusted, _ := fingerprintTrusted(fp); trusted {
-				steps = append(steps, Step{Name: "old authority " + fp[:12], Done: false, Detail: "a rotated-out authority is still trusted; doze trust removes it"})
+			if trusted, _ := fingerprintTrusted(req.CA, fp); trusted {
+				steps = append(steps, Step{Name: "old authority " + shortFP(fp), Done: false, Detail: "a rotated-out authority is still trusted; doze trust removes it"})
 			}
 		}
 	}
@@ -82,32 +87,49 @@ func TrustStatus(req TrustRequest) []Step {
 	return steps
 }
 
+// TrustSupported says this platform has domain routes and a trust store.
+func TrustSupported() bool { return platformTrust() == nil }
+
 // Trust installs the routes and trusts the authority, in one prompt. It is
-// idempotent: what is in place already is left alone.
+// idempotent: what is in place already is left alone, and so is a route
+// file that is someone else's.
 func Trust(o Options, req TrustRequest) error {
 	if err := platformTrust(); err != nil {
 		return err
 	}
 	var script, what []string
-	var missing []string
+	var missing, foreign []string
 	for _, d := range RouteDomains(req.Domains) {
+		if routeForeign(d) {
+			foreign = append(foreign, d)
+			continue
+		}
 		if done, _ := domainRouted(d); !done {
 			missing = append(missing, d)
 		}
 	}
+	for _, d := range foreign {
+		_, detail := domainRouted(d)
+		fmt.Fprintf(o.out(), "✗ route %s · %s\n", d, detail)
+	}
 	if len(missing) > 0 || len(req.Prune) > 0 {
-		script = append(script, routesScript(req.routeSet(), req.Prune))
+		if s := routesScript(req.routeSet(), missing, req.Prune); s != "" {
+			script = append(script, s)
+		}
 		if len(missing) > 0 {
 			what = append(what, "route "+strings.Join(missing, ", ")+" to doze")
 		}
 		if len(req.Prune) > 0 {
 			what = append(what, "remove the stale route for "+strings.Join(req.Prune, ", "))
 		}
+		if others := othersIn(req.routeSet(), missing); len(others) > 0 && restatesRoutes() {
+			what = append(what, "restate the routes other stacks keep ("+strings.Join(others, ", ")+")")
+		}
 	}
 	if req.CA != nil {
 		for _, fp := range req.CA.previous {
-			if trusted, _ := fingerprintTrusted(fp); trusted {
-				script = append(script, untrustFingerprintScript(fp))
+			if trusted, _ := fingerprintTrusted(req.CA, fp); trusted {
+				script = append(script, untrustFingerprintScript(req.CA, fp))
 				what = append(what, "stop trusting a rotated-out authority")
 			}
 		}
@@ -147,30 +169,63 @@ func Trust(o Options, req TrustRequest) error {
 	return nil
 }
 
+// othersIn are the routes in set that are not in mine.
+func othersIn(set, mine []string) []string {
+	isMine := map[string]bool{}
+	for _, d := range mine {
+		isMine[d] = true
+	}
+	var out []string
+	for _, d := range set {
+		if !isMine[d] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// restatesRoutes says the platform writes the whole route set on every
+// change (Linux), so the prompt must mention the others.
+func restatesRoutes() bool { return routesScript([]string{"a.example.com"}, nil, nil) != "" }
+
 // Untrust removes the request's routes and, when CA is set, every trust of
-// the authority (the current root and any rotated out), in one prompt.
-// Routes other projects still declare are kept.
+// the authority (the current root and any rotated out), in one prompt; with
+// UntrustAll, every doze authority the machine holds. Routes other projects
+// still declare are kept.
 func Untrust(o Options, req TrustRequest) error {
 	if err := platformTrust(); err != nil {
 		return err
 	}
-	var script []string
+	var script, what []string
 	removing := RouteDomains(req.Domains)
 	if len(removing) > 0 {
 		keep := TrustRequest{Home: req.Home, Prune: removing}.routeSet()
-		script = append(script, routesScript(keep, removing))
+		if s := routesScript(keep, nil, removing); s != "" {
+			script = append(script, s)
+			what = append(what, "remove the route for "+strings.Join(removing, ", "))
+		}
 	}
 	if req.CA != nil {
 		script = append(script, untrustScript(req.CA))
 		for _, fp := range req.CA.previous {
-			script = append(script, untrustFingerprintScript(fp))
+			script = append(script, untrustFingerprintScript(req.CA, fp))
+		}
+		what = append(what, "stop trusting the doze certificate authority")
+	}
+	if req.UntrustAll {
+		if s := untrustUnknownScript(); len(s) > 0 {
+			script = append(script, s...)
+			if req.CA == nil {
+				what = append(what, "stop trusting every doze certificate authority")
+			}
 		}
 	}
+	script = nonEmpty(script)
 	if len(script) == 0 {
 		fmt.Fprintln(o.out(), "nothing to remove")
 		return nil
 	}
-	if err := runPrivileged(o, "remove the domain routes and the certificate authority's trust", strings.Join(script, "\n")); err != nil {
+	if err := runPrivileged(o, strings.Join(what, "; "), strings.Join(script, "\n")); err != nil {
 		return err
 	}
 	if o.Print {
@@ -185,24 +240,36 @@ func Untrust(o Options, req TrustRequest) error {
 	return nil
 }
 
+func nonEmpty(lines []string) []string {
+	out := lines[:0:0]
+	for _, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // ErrNoTrust says this platform has no domain routes or trust store yet.
 var ErrNoTrust = errors.New("domains and https are not set up on this platform yet")
 
 // cleanupScript is what dns-setup --uninstall adds for domains: every
-// recorded route removed, and the authority's trust, so nothing of doze is
-// left pointing at a resolver that will not come back.
+// recorded route removed, and every doze authority's trust, whether or not
+// the files that made it can still be read, so nothing of doze is left
+// pointing at a resolver that will not come back.
 func cleanupScript(home string) []string {
 	var out []string
 	if routes := RecordedRoutes(home); len(routes) > 0 {
-		out = append(out, routesScript(nil, routes))
+		out = append(out, uninstallRoutesScript(routes))
 	}
-	if ca, ok := OpenCA(CADir(home)); ok {
+	if ca, err := ProbeCA(CADir(home)); ca != nil && err == nil {
 		out = append(out, untrustScript(ca))
 		for _, fp := range ca.previous {
-			out = append(out, untrustFingerprintScript(fp))
+			out = append(out, untrustFingerprintScript(ca, fp))
 		}
 	}
-	return out
+	out = append(out, untrustUnknownScript()...)
+	return nonEmpty(out)
 }
 
 // cleanupAfter removes what the person owns once the privileged part ran:

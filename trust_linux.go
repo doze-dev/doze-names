@@ -42,9 +42,15 @@ func domainRouted(domain string) (bool, string) {
 	return false, domain + " is not routed to the doze resolver"
 }
 
+// routeForeign: a resolved route is doze's own setting on doze's own link,
+// so nothing here is anyone else's.
+func routeForeign(string) bool { return false }
+
 // routesScript sets the link's domain list to the zone plus every route to
-// keep, now and at boot. The dropped routes are simply not in it.
-func routesScript(keep, _ []string) string {
+// keep, now and at boot. The routes to write are in keep already; the
+// dropped ones are simply not in it. The live setting fails harmlessly when
+// the link is not up (the drop-in still sets it at the next boot).
+func routesScript(keep, _, _ []string) string {
 	toks := []string{"~" + Suffix}
 	for _, d := range keep {
 		toks = append(toks, "~"+d)
@@ -52,12 +58,16 @@ func routesScript(keep, _ []string) string {
 	list := strings.Join(toks, " ")
 	unit := fmt.Sprintf("[Service]\nExecStart=-/usr/bin/resolvectl domain %s %s\n", resolverIface, list)
 	return strings.Join([]string{
-		fmt.Sprintf("resolvectl domain %s %s", resolverIface, list),
+		fmt.Sprintf("resolvectl domain %s %s 2>/dev/null || true", resolverIface, list),
 		"mkdir -p " + shellQuote(strings.TrimSuffix(routesDropIn, "/domains.conf")),
 		"printf '%s' " + shellQuote(unit) + " > " + shellQuote(routesDropIn),
 		"systemctl daemon-reload 2>/dev/null || true",
 	}, "\n")
 }
+
+// uninstallRoutesScript: the zone's link and its drop-in go with the zone
+// (setup_linux.go), and the routes with them; nothing is restated.
+func uninstallRoutesScript([]string) string { return "" }
 
 func caBundlePath() (path, update string) {
 	if _, err := os.Stat("/etc/pki/ca-trust/source/anchors"); err == nil {
@@ -78,16 +88,24 @@ func caTrusted(ca *CA) (bool, string) {
 
 // fingerprintTrusted: the bundle holds one doze root at a time (cp -f), so a
 // rotated-out root is gone with the rotation.
-func fingerprintTrusted(string) (bool, string) { return false, "" }
+func fingerprintTrusted(*CA, string) (bool, string) { return false, "" }
+
+func trustedDozeRoots() []string { return nil }
 
 func trustScript(ca *CA) string {
 	path, update := caBundlePath()
 	return fmt.Sprintf("cp -f %s %s\n%s", shellQuote(ca.RootPath()), shellQuote(path), update)
 }
 
-func untrustScript(ca *CA) string {
+func untrustScript(*CA) string {
 	path, update := caBundlePath()
 	return fmt.Sprintf("rm -f %s\n%s", shellQuote(path), update)
 }
 
-func untrustFingerprintScript(string) string { return "true" }
+func untrustFingerprintScript(*CA, string) string { return "" }
+
+// untrustUnknownScript removes whatever doze root the bundle holds; the
+// file is doze's by name, so no fingerprint is needed.
+func untrustUnknownScript() []string { return []string{untrustScript(nil)} }
+
+func platformRootsPEM() []byte { return nil }

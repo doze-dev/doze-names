@@ -77,6 +77,11 @@ type Options struct {
 	// Print writes the privileged script to Out instead of running it, for
 	// anyone who would rather paste it themselves than hand a tool sudo.
 	Print bool
+	// Run, when set, runs the privileged script in place of sudo: a program
+	// with no terminal asks for the password its own way (the macOS
+	// administrator prompt, say). what says in a few words what the script
+	// is for, for that prompt. It is not used when already root.
+	Run func(what, script string) error
 }
 
 func (o Options) out() io.Writer {
@@ -199,6 +204,12 @@ func runPrivileged(o Options, what, script string) error {
 	// running as uid 0 with every permission it needs would shell out to a
 	// missing binary and report that the privileged step failed. And it said
 	// "doze needs sudo once" while saying it, which is the opposite of true.
+	if o.Run != nil && os.Geteuid() != 0 {
+		if err := o.Run(what, script); err != nil {
+			return fmt.Errorf("setup: %w", err)
+		}
+		return nil
+	}
 	c := exec.Command("sudo", "sh", "-c", script)
 	if os.Geteuid() == 0 {
 		c = exec.Command("sh", "-c", script)

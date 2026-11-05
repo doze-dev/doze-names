@@ -78,7 +78,8 @@ func (l *Lease) setPort(public, private int) error {
 	if public <= 0 || public > 65535 {
 		return fmt.Errorf("%s: port %d is not a port", l.Name.Host, public)
 	}
-	return l.reg.update(func(m map[string]Entry) error {
+	var after map[string]int
+	err := l.reg.update(func(m map[string]Entry) error {
 		e, ok := m[l.Name.Host]
 		if !ok || e.PID != l.reg.pid {
 			return fmt.Errorf("%s is not held by this process", l.Name.Host)
@@ -97,8 +98,14 @@ func (l *Lease) setPort(public, private int) error {
 			e.Ports = nil
 		}
 		m[l.Name.Host] = e
+		after = e.Ports
 		return nil
 	})
+	if err == nil {
+		l.reg.remember(l.Name.Host, public, private)
+		err = writePorts(l.reg.path, l.Name.Host, l.reg.pid, after)
+	}
+	return err
 }
 
 // listener is a translated port's listener. It answers for the public address
@@ -155,6 +162,7 @@ func readPortTable(path string, n network) *portTable {
 		return t
 	}
 	frontDoor := m[ingressKey]
+	side := readPorts(path)
 	for host, e := range m {
 		if !InZone(host) || !alive(e.PID) {
 			continue
@@ -171,14 +179,24 @@ func readPortTable(path string, n network) *portTable {
 			}
 			t.toPrivate[v][public], t.toPublic[v][private] = private, public
 		}
-		for k, private := range e.Ports {
+		ports := e.Ports
+		if s, ok := side[host]; ok && s.PID == e.PID && len(s.Ports) > 0 {
+			ports = map[string]int{}
+			for k, v := range e.Ports {
+				ports[k] = v
+			}
+			for k, v := range s.Ports {
+				ports[k] = v
+			}
+		}
+		for k, private := range ports {
 			if public, err := strconv.Atoi(k); err == nil && public > 0 && public < 65536 && private > 0 && private < 65536 {
 				add(uint16(public), uint16(private))
 			}
 		}
 		// A routed name is answered by the front door unless the service took
 		// port 80 for itself.
-		if _, own := e.Ports[strconv.Itoa(frontDoorPort)]; !own && e.Target != "" && alive(frontDoor.PID) {
+		if _, own := ports[strconv.Itoa(frontDoorPort)]; !own && e.Target != "" && alive(frontDoor.PID) {
 			if frontDoor.Target == ingressBind {
 				add(frontDoorPort, frontDoorPort)
 			}

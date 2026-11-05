@@ -67,10 +67,17 @@ const netdOwner = "doze-netd"
 // that is not its own and installs again, and check reports the older
 // daemon until it does. Raise it whenever the daemon's behaviour changes.
 //
-//	1  translates packets (macOS)
-//	2  also answers the zone when no doze program does; on Linux, the
-//	   daemon exists from this version and does only that
+//		1  translates packets (macOS)
+//		2  also answers the zone when no doze program does; on Linux, the
+//		   daemon exists from this version and does only that
+//	 3  (macOS only) also reads the ports from names.ports.json, which no
+//	    older doze program can strip; the Linux daemon does not translate
+//	    and stays at 2.
 const netdVersion = "2"
+
+// netdVersionDarwin is the macOS daemon's version: it translates, so it
+// moves on when the translation does.
+const netdVersionDarwin = "3"
 
 func fileExists(path string) bool {
 	_, err := os.Stat(path)

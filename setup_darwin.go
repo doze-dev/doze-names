@@ -47,7 +47,7 @@ func launchdPlist(registry string, uid, gid int) string {
   <key>ThrottleInterval</key><integer>10</integer>
   <key>StandardErrorPath</key><string>` + helperLog + `</string>
   <key>EnvironmentVariables</key>
-  <dict><key>DOZE_NETD_VERSION</key><string>` + netdVersion + `</string></dict>
+  <dict><key>DOZE_NETD_VERSION</key><string>` + netdVersionDarwin + `</string></dict>
   <key>ProgramArguments</key>
   <array>
     <string>` + helperPath + `</string>
@@ -183,7 +183,7 @@ func uninstall(o Options) error {
 // netdOutdated reports that the launchd job at path starts a daemon older
 // than this build's (netd.go).
 func netdOutdated(path string) bool {
-	return jobOutdated(path, "<key>DOZE_NETD_VERSION</key><string>"+netdVersion+"</string>")
+	return jobOutdated(path, "<key>DOZE_NETD_VERSION</key><string>"+netdVersionDarwin+"</string>")
 }
 
 // servesHome reports whether a live daemon translates from this zone's

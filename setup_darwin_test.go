@@ -24,7 +24,7 @@ func TestCheckSeesADaemonFromAnOlderSetup(t *testing.T) {
 	if netdOutdated(path) {
 		t.Error("this build's job is current")
 	}
-	write(strings.Replace(current, "<string>"+netdVersion+"</string>", "<string>1</string>", 1))
+	write(strings.Replace(current, "<string>"+netdVersionDarwin+"</string>", "<string>2</string>", 1))
 	if !netdOutdated(path) {
 		t.Error("a job naming an earlier version is old")
 	}

@@ -1,6 +1,7 @@
 package names
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,5 +156,44 @@ func TestPasteableScriptSurvivesItsOwnQuotes(t *testing.T) {
 	body := strings.TrimSuffix(strings.TrimPrefix(got, "sudo sh <<'DOZE_SETUP'\n"), "\nDOZE_SETUP\n")
 	if strings.Contains(body, "DOZE_SETUP") {
 		t.Error("the script contains the heredoc delimiter")
+	}
+}
+
+// A program with no terminal hands the script to its own runner, once, with
+// what it is for; nothing is printed and sudo is not asked.
+func TestRunReplacesSudo(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root runs the script directly")
+	}
+	var gotWhat, gotScript string
+	calls := 0
+	var out strings.Builder
+	o := Options{Out: &out, Run: func(what, script string) error {
+		calls++
+		gotWhat, gotScript = what, script
+		return nil
+	}}
+	if err := runPrivileged(o, "route .doze", "echo hi"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || gotWhat != "route .doze" || gotScript != "echo hi" {
+		t.Fatalf("Run got %d calls, %q, %q", calls, gotWhat, gotScript)
+	}
+	if out.Len() != 0 {
+		t.Errorf("printed %q; the runner speaks for itself", out.String())
+	}
+
+	// Its error comes back, still matchable.
+	refused := errors.New("cancelled")
+	o.Run = func(string, string) error { return refused }
+	if err := runPrivileged(o, "x", "y"); !errors.Is(err, refused) {
+		t.Fatalf("err = %v, want it to wrap the runner's", err)
+	}
+
+	// Print still prints and runs nothing.
+	calls = 0
+	o.Print, o.Run = true, func(string, string) error { calls++; return nil }
+	if err := runPrivileged(o, "x", "y"); err != nil || calls != 0 {
+		t.Fatalf("Print ran the script (calls %d, err %v)", calls, err)
 	}
 }

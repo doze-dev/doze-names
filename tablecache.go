@@ -49,8 +49,10 @@ func (c *tableCache) refresh(force bool) {
 	// that swaps one five-digit port for another, looked like no write at
 	// all, and the table sent the next connection to the old port.
 	stamp := ""
-	if st, err := os.Stat(c.path); err == nil {
-		stamp = strconv.FormatUint(fileID(st), 10) + "/" + strconv.FormatInt(st.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(st.Size(), 10)
+	for _, p := range []string{c.path, portsPath(c.path)} {
+		if st, err := os.Stat(p); err == nil {
+			stamp += strconv.FormatUint(fileID(st), 10) + "/" + strconv.FormatInt(st.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(st.Size(), 10) + ";"
+		}
 	}
 	if !force && stamp == c.stamp {
 		return

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // FileName is the registry's name inside the doze home.
@@ -76,6 +77,14 @@ type Registry struct {
 	path  string
 	owner string
 	pid   int
+
+	// forwards is every port this process translated, by name, kept so it
+	// can be put back: a writer built before Entry.Ports existed (an older
+	// doze-aws, say) rewrites the file without them, and the network
+	// daemon then refuses every connection to the name. See heal.
+	fwdMu    sync.Mutex
+	forwards map[string]map[string]int
+	healing  bool
 }
 
 // Open returns a handle on the registry in the given doze home. It creates

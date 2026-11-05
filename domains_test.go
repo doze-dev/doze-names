@@ -1,9 +1,14 @@
 package names
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,4 +261,98 @@ func TestAPersonsOwnCertificateIsServedAndChecked(t *testing.T) {
 	if _, err := r.GetCertificate(nil)(&tls.ClientHelloInfo{ServerName: "api.acme.com"}); err != nil {
 		t.Errorf("files need no authority: %v", err)
 	}
+}
+
+func TestTheFrontDoorServesADomainOverTLSAndRedirectsPlainRequests(t *testing.T) {
+	reg := Open(t.TempDir(), "doze")
+	ca, err := LoadOrCreateCA(filepath.Join(t.TempDir(), "ca"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, "hello from "+r.Host)
+	}))
+	defer backend.Close()
+	web, err := reg.Claim(Qualified("web", "shop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = web.Release() })
+	wild, err := web.Twin(DomainName("*.dev.acme.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wild.Route(backend.Listener.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	if err := web.Route(backend.Listener.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	// Two free ports on loopback stand in for 80 and 443.
+	plain, tlsAddr := freeAddr(t, "tcp4"), freeAddr(t, "tcp4")
+	t.Setenv(EnvIngress, plain)
+	t.Setenv(EnvIngressTLS, tlsAddr)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	front := ServeFrontDoor(ctx, reg, ca, t.Logf)
+	defer front.Close()
+	if !front.Bound(ctx) {
+		t.Fatal("the plain port was never bound")
+	}
+	waitFor(t, func() bool { _, ok := reg.IngressTLSHolder(); return ok })
+
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: "tenant.dev.acme.com"},
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "tcp", tlsAddr)
+			},
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := client.Get("https://tenant.dev.acme.com/")
+	if err != nil {
+		t.Fatalf("https through the front door: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 || string(body) != "hello from tenant.dev.acme.com" {
+		t.Errorf("https answer = %d %q", resp.StatusCode, body)
+	}
+	// Plain http for a domain is sent to https; a doze name stays plain.
+	plainClient := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	req, _ := http.NewRequestWithContext(ctx, "GET", "http://"+plain+"/x?y=1", nil)
+	req.Host = "tenant.dev.acme.com"
+	r2, err := plainClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r2.Body.Close()
+	if r2.StatusCode != http.StatusTemporaryRedirect || r2.Header.Get("Location") != "https://tenant.dev.acme.com/x?y=1" {
+		t.Errorf("plain request for a domain = %d %q", r2.StatusCode, r2.Header.Get("Location"))
+	}
+	req3, _ := http.NewRequestWithContext(ctx, "GET", "http://"+plain+"/", nil)
+	req3.Host = "web.shop.doze"
+	r3, err := plainClient.Do(req3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b3, _ := io.ReadAll(r3.Body)
+	_ = r3.Body.Close()
+	if r3.StatusCode != 200 || string(b3) != "hello from web.shop.doze" {
+		t.Errorf("a doze name over plain http = %d %q", r3.StatusCode, b3)
+	}
+}
+
+func waitFor(t *testing.T, ok func() bool) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting")
 }

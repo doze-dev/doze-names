@@ -291,3 +291,15 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	}
 	return os.Rename(tmp, path)
 }
+
+// OpenCA opens the authority under dir without making one: for a surface
+// that only reports on it. ok is false when there is none yet.
+func OpenCA(dir string) (*CA, bool) {
+	c := &CA{dir: dir, leafs: map[string]*tls.Certificate{}}
+	certPEM, err1 := os.ReadFile(filepath.Join(dir, caCertName))
+	keyPEM, err2 := os.ReadFile(filepath.Join(dir, caKeyName))
+	if err1 != nil || err2 != nil || c.load(certPEM, keyPEM) != nil {
+		return nil, false
+	}
+	return c, true
+}

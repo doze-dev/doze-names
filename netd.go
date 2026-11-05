@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,6 +39,23 @@ func setupUser() (uid, gid int, err error) {
 		return 0, 0, fmt.Errorf("setup has to know whose services to serve: run it as yourself, not as root")
 	}
 	return uid, gid, nil
+}
+
+// setupHome is the names folder of the person running setup, also when they
+// ran it under sudo: root's HOME is not theirs, and a daemon pointed at
+// /root/.doze answers the zone from an empty registry.
+func setupHome() string {
+	if h := os.Getenv(EnvHome); h != "" {
+		return h
+	}
+	if os.Getuid() == 0 {
+		if uid := os.Getenv("SUDO_UID"); uid != "" {
+			if u, err := user.LookupId(uid); err == nil && u.HomeDir != "" {
+				return filepath.Join(u.HomeDir, "."+Suffix)
+			}
+		}
+	}
+	return Home()
 }
 
 // netdOwner is how the daemon signs the registry while it serves: what a

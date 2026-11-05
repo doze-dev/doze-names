@@ -79,6 +79,10 @@ func netdStep() Step {
 		st.Detail = "not installed — a routed domain is unreachable while no stack runs"
 	case netdOutdated():
 		st.Detail = "from an older setup — run setup again (one sudo), so a routed domain is answered when no stack runs"
+	case netdServes() != "" && netdServes() != filepath.Join(setupHome(), FileName):
+		// Set up under a sudo that swapped HOME for root's: the daemon answers
+		// from a registry nobody writes.
+		st.Detail = "answers from " + netdServes() + ", not your registry — run setup again (one sudo)"
 	case !netdActive():
 		st.Detail = "installed but not running (systemctl status " + netdUnitName + ")"
 	default:
@@ -308,7 +312,7 @@ func install(o Options) error {
 		}
 		fmt.Fprintf(&b, "mkdir -p %s && cp -f %s %s && chown root:root %s && chmod 755 %s\n",
 			shellQuote(filepath.Dir(netdPath)), shellQuote(self), netdPath, netdPath, netdPath)
-		fmt.Fprintf(&b, "printf %s > %s\n", shellQuote(netdUnit(filepath.Join(Home(), FileName), uid, gid)), netdUnitPath)
+		fmt.Fprintf(&b, "printf %s > %s\n", shellQuote(netdUnit(filepath.Join(setupHome(), FileName), uid, gid)), netdUnitPath)
 		fmt.Fprintf(&b, "systemctl daemon-reload && systemctl enable --now %s && systemctl restart %s\n", netdUnitName, netdUnitName)
 	}
 
@@ -370,4 +374,22 @@ func uninstall(o Options) error {
 		fmt.Fprintln(o.out(), "✓ removed")
 	}
 	return nil
+}
+
+// netdServes is the registry the installed unit points the daemon at: the
+// last word of its ExecStart line, or "" when there is no unit.
+func netdServes() string {
+	b, err := os.ReadFile(netdUnitPath)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "ExecStart=") {
+			f := strings.Fields(line)
+			if len(f) > 0 {
+				return f[len(f)-1]
+			}
+		}
+	}
+	return ""
 }

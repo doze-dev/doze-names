@@ -109,7 +109,7 @@ func install(o Options) error {
 	if err != nil {
 		return err
 	}
-	plist := launchdPlist(filepath.Join(Home(), FileName), uid, gid)
+	plist := launchdPlist(filepath.Join(setupHome(), FileName), uid, gid)
 	if check().OK() {
 		if cur, err := os.ReadFile(launchdPath); err == nil && string(cur) == plist {
 			fmt.Fprintln(o.out(), "✓ already set up — nothing to do")
